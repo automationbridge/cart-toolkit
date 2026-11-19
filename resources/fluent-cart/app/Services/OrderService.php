@@ -1,0 +1,618 @@
+<?php
+
+namespace FluentCart\App\Services;
+
+use FluentCart\Api\ModuleSettings;
+use FluentCart\Api\StoreSettings;
+use FluentCart\App\App;
+use FluentCart\App\Helpers\AddressHelper;
+use FluentCart\App\Helpers\Helper;
+use FluentCart\App\Helpers\Status;
+use FluentCart\App\Models\Model;
+use FluentCart\App\Models\Order;
+use FluentCart\App\Models\OrderItem;
+use FluentCart\App\Models\OrderMeta;
+use FluentCart\App\Models\OrderTransaction;
+use FluentCart\App\Models\ProductVariation;
+use FluentCart\App\Models\Subscription;
+use FluentCart\App\Modules\StockManagement\StockManagement;
+use FluentCart\App\Modules\Subscriptions\Services\SystemChargeService;
+use FluentCart\App\Services\Payments\PaymentHelper;
+use FluentCart\App\Services\Renderer\CheckoutFieldsSchema;
+use FluentCart\Framework\Support\Arr;
+
+class OrderService
+{
+    /**
+     * Group address and other data from the order data array.
+     *
+     * @param array $order_data
+     * @return array
+     */
+    public static function groupSanitizedData($order_data = []): array
+    {
+        // fct_billing_tax_id is the checkout field name for the VAT number; normalise it to
+        // billing_vat_number so extractAddressData maps it into billing_address.vat_number
+        if (isset($order_data['fct_billing_tax_id'])) {
+            $order_data['billing_vat_number'] = $order_data['fct_billing_tax_id'];
+            unset($order_data['fct_billing_tax_id']);
+        }
+
+        $billingAddress = static::extractAddressData($order_data, 'billing_');
+        $shippingAddress = static::extractAddressData($order_data, 'shipping_');
+        $others = static::extractOtherData($order_data);
+
+        if (Arr::get($others, 'ship_to_different', 'no') === 'no') {
+            $shippingAddress = $billingAddress;
+        }
+
+        $billingAddress = static::finalizeAddress($billingAddress, 'billing');
+        $shippingAddress = static::finalizeAddress($shippingAddress, 'shipping');
+
+        return [
+            'billing_address'  => $billingAddress,
+            'shipping_address' => $shippingAddress,
+            'others'           => $others,
+        ];
+    }
+
+    private static function extractAddressData($data, $prefix): array
+    {
+        $address = [];
+        foreach ($data as $key => $value) {
+            if (strpos($key, $prefix) === 0) {
+                $newKey = str_replace($prefix, '', $key);
+                $address[$newKey] = static::sanitizeEmailOrText($newKey, $value);
+            }
+        }
+        return $address;
+    }
+
+    private static function extractOtherData($data): array
+    {
+        $others = [];
+        foreach ($data as $key => $value) {
+            if (strpos($key, 'billing_') !== 0 && strpos($key, 'shipping_') !== 0) {
+                $others[$key] = sanitize_text_field($value);
+            }
+        }
+
+        return $others;
+    }
+
+    private static function finalizeAddress($address, $type): array
+    {
+        $fullName = Arr::get($address, 'full_name', '');
+        $name = Arr::get($address, 'name', '');
+        $explicitFirstName = trim((string) Arr::get($address, 'first_name', ''));
+        $explicitLastName = trim((string) Arr::get($address, 'last_name', ''));
+        $address['full_name'] = $fullName ?? $name;
+        $address['first_name'] = AddressHelper::guessFirstNameAndLastName($address['full_name']);
+        $address['type'] = $type;
+        $name = $fullName ?? $name;
+
+        // In First/Last mode the customer typed both names, so keep them as
+        // typed. Guessing from the joined name would turn "Alex" + "de Silva"
+        // into "Alex de" + "Silva". Full-name-only addresses are still guessed.
+        if (!CheckoutFieldsSchema::isFullNameRequired() && $explicitFirstName !== '') {
+            $address['first_name'] = $explicitFirstName;
+            $address['last_name'] = $explicitLastName;
+        } else {
+            $address = array_merge($address, AddressHelper::guessFirstNameAndLastName($name));
+        }
+        $address['name'] = Arr::get($address, 'first_name', '') . ' ' . Arr::get($address, 'last_name', '');
+        return $address;
+    }
+
+
+    /**
+     * Sanitize email or text field based on the key.
+     *
+     * @param string $key
+     * @param string $value
+     * @return string
+     */
+    public static function sanitizeEmailOrText($key, $value): string
+    {
+        return $key === 'email' ? sanitize_email($value ?? '') : sanitize_text_field($value ?? '');
+    }
+
+    /**
+     * Pluck product IDs from the order.
+     *
+     * @param Order $order
+     * @return array
+     */
+    public static function pluckProductIds(Order $order): array
+    {
+        return array_column($order->order_items->toArray(), 'post_id');
+    }
+
+
+    /**
+     * Validate products and check if they are available by stock.
+     *
+     * @param array $products
+     * @return void
+     * @throws \Exception
+     */
+    public static function validateProducts($products,$prevOrder = null)
+    {
+        $itemIds = array_column($products, 'object_id');
+        $currentVariations = ProductVariation::query()
+            ->whereIn('id', $itemIds)
+            ->with(['product.detail', 'product_detail'])
+            ->get()
+            ->keyBy('id')
+            ->toArray();
+
+        $heldUnits = [];
+        if ($prevOrder) {
+            $heldUnits = StockManagement::heldUnitsByVariation(
+                $prevOrder->order_items,
+                OrderMeta::where('order_id', $prevOrder->id)->where('meta_key', 'stock_movement')->value('meta_value')
+            );
+        }
+
+        foreach ($products as $product) {
+            // Custom item validation occurs during cart insertion.
+            // If the validation hook is missing or fails, the item is not added to the cart 
+            // and therefore never reaches OrderService. 
+            // Adding a fallback here would duplicate responsibility and break cart invariants.
+            // is_custom is already normalized and validated at cart level.
+            // No coercion required here.
+            if(!Arr::get($product, 'is_custom', false)) {
+                static::validateProductAvailability($product, $currentVariations);
+                static::validateSubscriptionQuantity($product);
+                $held = (int)Arr::get($heldUnits, $product['object_id'], 0);
+                static::validateStockStatus($product, $currentVariations, $held);
+                static::validateStockQuantity($product, $currentVariations, $held);
+            }
+        }
+    }
+
+    private static function validateProductAvailability($product, $currentVariations)
+    {
+        $currentVariation = $currentVariations[$product['object_id']] ?? null;
+
+        if (
+            empty($currentVariation) ||
+            empty($currentVariation['product']) ||
+            !in_array($currentVariation['product']['post_status'], ['publish', 'private'])
+        ) {
+            throw new \Exception(sprintf(
+                /* translators: %s: product title */
+                esc_html__('[%s] is not available.', 'fluent-cart'),
+                esc_html(Arr::get($product, 'title'))
+            ));
+        }
+    }
+
+    private static function validateSubscriptionQuantity($product)
+    {
+        $paymentType = Arr::get($product, 'other_info.payment_type', 'onetime');
+
+        if ($paymentType === 'subscription' && Arr::get($product, 'quantity') > 1) {
+            throw new \Exception(
+                sprintf(
+                    /* translators: %s: product title */
+                    esc_html__('You cannot purchase multiple quantities of the subscription product [%s]. Please adjust the quantity to 1.', 'fluent-cart'),
+                    esc_html(Arr::get($product, 'title'))
+                )
+            );
+        }
+    }
+
+    private static function validateStockStatus($product, $currentVariations, $heldUnits = 0)
+    {
+        if (!ModuleSettings::isActive('stock_management')) {
+            return;
+        }
+
+        $currentVariation = $currentVariations[$product['object_id']] ?? null;
+
+        // The order's own hold can be what emptied the shelf; the quantity check counts it.
+        if ($heldUnits > 0) {
+            return;
+        }
+
+        if (
+            Arr::get($currentVariation, 'stock_status') !== "in-stock" &&
+            Arr::get($currentVariation, 'manage_stock') == 1
+        ) {
+            throw new \Exception(sprintf(
+                /* translators: %s: product title */
+                esc_html__('[%s] is out of stock.', 'fluent-cart'),
+                esc_html(Arr::get($product, 'title') ?: Arr::get($currentVariation, 'product.post_title'))
+            ));
+        }
+    }
+
+    private static function validateStockQuantity($product, $currentVariations, $heldUnits = 0)
+    {
+        if (!ModuleSettings::isActive('stock_management')) {
+            return;
+        }
+        $currentVariation = $currentVariations[$product['object_id']] ?? null;
+        $productQuantity = (int)Arr::get($product, 'quantity');
+
+        // A retried order may take back the units it already holds, and no more.
+        $currentVariation['available'] = (int)Arr::get($currentVariation, 'available') + $heldUnits;
+
+        if (!static::allowItemToOrder($currentVariation, $productQuantity)) {
+            $note = sprintf(
+                /* translators: %s: product title */
+                esc_html__('[%1$s] is out of stock. Only %2$s left.', 'fluent-cart'),
+                esc_html(Arr::get($product, 'title') ?: Arr::get($currentVariation, 'product.post_title')),
+                esc_html(Arr::get($currentVariation, 'available'))
+            );
+            throw new \Exception(esc_html($note));
+        }
+    }
+
+    /**
+     * Check if the item can be ordered based on stock availability.
+     *
+     * @param array $variation
+     * @param int $updatedQuantity
+     * @return bool
+     */
+    private static function allowItemToOrder($variation, $updatedQuantity): bool
+    {
+        if (Arr::get($variation, 'manage_stock') == 0) {
+            return true;
+        }
+        return $updatedQuantity <= Arr::get($variation, 'available');
+    }
+
+    /**
+     * Get the total amount of items without discount.
+     *
+     * @param array $orderItems
+     * @return float
+     */
+    public static function getItemsAmountWithoutDiscount(array $orderItems)
+    {
+        $total = 0;
+        foreach ($orderItems as $orderItem) {
+            $paymentType = Arr::get($orderItem, 'payment_type');
+            if (!$paymentType) {
+                $paymentType = Arr::get($orderItem, 'other_info.payment_type');
+            }
+
+            $total += self::calculateItemTotal($orderItem, $paymentType);
+
+        }
+        return $total;
+    }
+
+    private static function isDiscountedSubscription($orderItem): bool
+    {
+        $paymentType = Arr::get($orderItem, 'other_info.payment_type', '');
+        return $paymentType === 'subscription' && Arr::get($orderItem, 'discount_total', 0) > 0;
+    }
+
+    private static function isPlanChangeAdjustment($orderItem, $paymentType): bool
+    {
+        $orderType = Arr::get($orderItem, 'other_info.order_type', '');
+        return $orderType === 'plan_change' && $paymentType === 'adjustment';
+    }
+
+    private static function calculateItemTotal($orderItem, $paymentType): float
+    {
+
+        if (in_array($paymentType, ['signup_fee'], true)) {
+            return floatval($orderItem['unit_price']);
+        }
+
+        if ($paymentType == 'subscription') {
+            if ((int)Arr::get($orderItem, 'other_info.trial_days', 0) > 0) {
+                return (int)Arr::get($orderItem, 'other_info.signup_fee', 0);
+            }
+            return (int) Arr::get($orderItem, 'subtotal', intval($orderItem['unit_price'] * $orderItem['quantity'])) + (int)Arr::get($orderItem, 'other_info.signup_fee', 0);
+        }
+
+        return (int) Arr::get($orderItem, 'subtotal', intval($orderItem['unit_price'] * $orderItem['quantity']));
+    }
+
+    /**
+     * Get the total amount of items.
+     *
+     * @param array|Model $items
+     * @param bool $formatted
+     * @param bool $withCurrency
+     * @return float|string
+     */
+    public static function getItemsAmountTotal($items = [], $formatted = true, $withCurrency = true, $shippingTotal = 0)
+    {
+        $items = $items instanceof Model ? $items->toArray() : $items;
+
+        $total = 0;
+
+        foreach ($items as $cartItem) {
+            // according to  cart structure, line total is item_price * quantity
+            $subtotal = floatval(Arr::get($cartItem, 'subtotal', 0));
+            $discountTotal = floatval(Arr::get($cartItem, 'discount_total', 0));
+
+            $otherInfo = Arr::get($cartItem, 'other_info', []);
+            if (is_object($otherInfo)) {
+                $otherInfo = (array)$otherInfo;
+            }
+
+            $trialDays = intval(Arr::get($otherInfo, 'trial_days', 0));
+            $signupFee = floatval(Arr::get($otherInfo, 'signup_fee', 0));
+
+            if ($trialDays > 0) {
+                // For subscriptions with trial days, charge only signup fee minus discount
+                // The discount_total is the discount applied to the signup fee
+                $total += max(0,$signupFee - $discountTotal);
+                continue;
+            }
+
+
+            $total += $subtotal - $discountTotal;
+
+
+            $total += floatval($signupFee - Arr::get($otherInfo, 'signup_discount', 0));
+        }
+
+        $total += $shippingTotal;
+
+        $total = apply_filters('fluent_cart/cart/items_total', $total, [
+            'items'          => $items,
+            'shipping_total' => $shippingTotal,
+        ]);
+
+        // Ensure filtered total is non-negative
+        $total = max(0, (int)round((float)$total));
+
+        return $formatted ? Helper::toDecimal($total, $withCurrency) : $total;
+    }
+
+    private static function calculateItemAmount(array $cartItem, $price, $paymentType, $formatted, $withCurrency)
+    {
+        if ($paymentType === 'signup_fee') {
+            return $price;
+        }
+        if ($paymentType === 'adjustment') {
+            return $formatted ? Helper::toDecimal(intval($price), $withCurrency) : intval($price);
+        }
+        $quantity = intval(Arr::get($cartItem, 'quantity', 1));
+        $discount = floatval(Arr::get($cartItem, 'discount_total', 0));
+        return (($price * $quantity) - $discount);
+    }
+
+    /**
+     * Create line items from order items.
+     *
+     * @param array $orderItems
+     * @return array
+     */
+    public static function makeLineItemsFromOrderItems($orderItems): array
+    {
+        $subscriptionItems = [];
+        $items = [];
+
+        foreach ($orderItems as $orderItem) {
+            $orderItem = $orderItem instanceof Model ? $orderItem->toArray() : $orderItem;
+            if (static::isSubscriptionItem($orderItem)) {
+                $subscriptionItems[] = static::prepareSubscriptionItem($orderItem);
+            } else {
+                $items[] = static::prepareRegularItem($orderItem);
+            }
+        }
+
+        return [
+            'items'             => $items,
+            'subscriptionItems' => $subscriptionItems
+        ];
+    }
+
+    private static function isSubscriptionItem(array $orderItem): bool
+    {
+        return Arr::get($orderItem, 'payment_type') === 'subscription';
+    }
+
+    private static function prepareSubscriptionItem(array $orderItem): array
+    {
+        $orderItem['other_info'] = Arr::get($orderItem, 'other_info', []);
+
+        $otherInfo = (array)Arr::get($orderItem, 'other_info');
+
+        return [
+            'product_id'          => Arr::get($orderItem, 'post_id'),
+            'object_id'           => Arr::get($orderItem, 'object_id', ''),
+            'billing_interval'    => Arr::get($otherInfo, 'repeat_interval'),
+            'signup_fee'          => Arr::get($otherInfo, 'signup_fee'),
+            'bill_times'          => Arr::get($otherInfo, 'times'),
+            'recurring_amount'    => floatval(Arr::get($orderItem, 'unit_price')) * intval(Arr::get($orderItem, 'quantity')),
+            'unit_price'          => floatval(Arr::get($orderItem, 'unit_price', 0)),
+            'recurring_tax_total' => floatval(Arr::get($orderItem, 'tax_amount')),
+            'recurring_total'     => floatval(Arr::get($orderItem, 'unit_price')),
+            'line_total'          => floatval(Arr::get($orderItem, 'line_total')),
+            'trial_days'          => empty(Arr::get($otherInfo, 'trial_days')) ? 0 : Arr::get($otherInfo, 'trial_days'),
+            'item_name'           => Arr::get($orderItem, 'title') . ' ' . Arr::get($orderItem, 'post_title'),
+            'title'               => Arr::get($orderItem, 'title') . ' ' . Arr::get($orderItem, 'post_title'),
+            'quantity'            => intval(Arr::get($orderItem, 'quantity')),
+            'variation_id'        => Arr::get($orderItem, 'object_id', 0),
+            'id'                  => Arr::get($orderItem, 'id'),
+            'other_info'          => Arr::get($orderItem, 'other_info'),
+        ];
+    }
+
+    private static function prepareRegularItem(array $orderItem): array
+    {
+        return [
+            'product_id'     => Arr::get($orderItem, 'post_id'),
+            'object_id'      => Arr::get($orderItem, 'object_id', ''),
+            'payment_type'   => Arr::get($orderItem, 'payment_type'),
+            'variation_id'   => Arr::get($orderItem, 'id'),
+            'quantity'       => intval(Arr::get($orderItem, 'quantity')),
+            'post_title'     => Arr::get($orderItem, 'post_title'),
+            'title'          => Arr::get($orderItem, 'title'),
+            'unit_price'     => floatval(Arr::get($orderItem, 'unit_price', 0)),
+            'item_price'     => floatval(Arr::get($orderItem, 'unit_price')),
+            'line_total'     => floatval(Arr::get($orderItem, 'line_total')),
+            'fallback_title' => Arr::get($orderItem, 'title'),
+        ];
+    }
+
+    /**
+     * Get the root order ID from a given order.
+     *
+     * @param Order $order
+     * @return id|null
+     */
+    public static function getRootOrderId($order, $visited = [])
+    {
+        if (in_array($order->id, $visited)) {
+            return null; // breaking the loop
+        }
+
+        $visited[] = $order->id;
+        if (empty($order->parent_id)) {
+            return $order->id;
+        }
+
+        $parentOrder = Order::query()->where('id', $order->parent_id)->first();
+
+        if (!$parentOrder) {
+            return $order->id;
+        }
+
+        return static::getRootOrderId($parentOrder, $visited);
+    }
+
+    public static function getCouponDiscountTotal($orderItems)
+    {
+        if (empty($orderItems)) {
+            return 0;
+        }
+
+        $coupon_discount_total = 0;
+        foreach ($orderItems as $item) {
+            $coupon_discount_total += Arr::get($item, 'discount_total', 0);
+        }
+
+        return $coupon_discount_total;
+    }
+
+    public static function getNextReceiptNumber()
+    {
+        $lastOrder = Order::query()->max('receipt_number');
+        if (empty($lastOrder)) {
+            $lastOrder = 0;
+        }
+
+        $nextOrderNumber = $lastOrder + 1;
+
+        $min_receipt_number = (new StoreSettings())->get('min_receipt_number') ?? 1;
+        $minReceiptNumber = apply_filters('fluent_cart/min_receipt_number', $min_receipt_number);
+
+        if ($nextOrderNumber < $minReceiptNumber) {
+            $nextOrderNumber = $minReceiptNumber;
+        }
+
+        return $nextOrderNumber;
+    }
+
+    public static function getInvoicePrefix()
+    {
+        $prefix = (new StoreSettings())->get('inv_prefix') ?? 'INV-';
+        return apply_filters('fluent_cart/invoice_prefix', $prefix);
+    }
+
+
+    public static function transformSubscription(Subscription $subscription)
+    {
+        return [
+            'uuid'                   => $subscription->uuid,
+            'vendor_subscription_id' => $subscription->vendor_subscription_id,
+            'status'                 => $subscription->status,
+            'overridden_status'      => $subscription->overridden_status,
+            'next_billing_date'      => $subscription->next_billing_date,
+            'billing_info'           => $subscription->billingInfo,
+            'current_payment_method' => $subscription->current_payment_method,
+            'payment_method'         => $subscription->payment_method,
+            'payment_method_title'   => $subscription->payment_method_title,
+            'payment_info'           => $subscription->payment_info,
+            'bill_times'             => $subscription->bill_times,
+            'bill_count'             => $subscription->bill_count,
+            'config'                 => $subscription->config,
+            'reactivate_url'         => $subscription->getReactivateUrl(),
+            'can_upgrade'            => $subscription->canUpgrade(),
+            'can_switch_payment_method' => $subscription->canSwitchPaymentMethod(),
+            'can_update_payment_method' => $subscription->canUpdatePaymentMethod(),
+            'collection_method'      => $subscription->collection_method,
+            'is_auto_charged'        => $subscription->isSystem(),
+            'item_name'              => $subscription->display_item_name
+        ];
+    }
+
+    /**
+     * A system renewal order still inside its auto-charge retry window has no
+     * Pay Now — the charge is coming automatically. Other renewals unaffected.
+     */
+    protected static function renewalPayNowAllowed(Order $order): bool
+    {
+        if (!$order->parent_id) {
+            return true;
+        }
+
+        $subscription = Subscription::query()->where('parent_order_id', $order->parent_id)->first();
+
+        if (!$subscription || !$subscription->isSystem()) {
+            return true;
+        }
+
+        return SystemChargeService::isExhausted($subscription, $order);
+    }
+
+    public static function transformTransaction(OrderTransaction $transaction)
+    {
+        $data = [
+            'uuid'             => $transaction->uuid,
+            'invoice_no'       => $transaction->order ? $transaction->order->invoice_no : 'n/a',
+            'created_at'       => $transaction->created_at->format('Y-m-d H:i:s'),
+            'total'            => $transaction->total,
+            'order_type'       => $transaction->order_type,
+            'currency'         => $transaction->currency,
+            'status'           => $transaction->status,
+            'payment_method'   => $transaction->payment_method,
+            'payment_method_title' => $transaction->order && $transaction->order->payment_method === $transaction->payment_method
+                ? PaymentHelper::getMethodTitle($transaction->payment_method, $transaction->order->payment_method_title)
+                : $transaction->payment_method_title,
+            'card_brand'       => $transaction->card_brand,
+            'card_last_4'      => $transaction->card_last_4,
+            'vendor_charge_id' => $transaction->vendor_charge_id,
+            'transaction_type' => $transaction->transaction_type,
+            'receipt_download_url' => $transaction->order ? $transaction->order->getReceiptDownloadUrl() : '',
+        ];
+
+        if ($transaction->order && self::canGenerateReceiptPdf()) {
+            $data['receipt_view_url'] = $transaction->order->getReceiptViewUrl();
+        }
+
+        if ($transaction->order
+            && $transaction->order->type === Status::ORDER_TYPE_RENEWAL
+            && $transaction->status === Status::TRANSACTION_PENDING
+            && self::renewalPayNowAllowed($transaction->order)
+        ) {
+            $data['custom_checkout_url'] = add_query_arg([
+                'fluent-cart' => 'custom_checkout',
+                'order_hash'  => $transaction->order->uuid,
+            ], home_url('/'));
+        }
+
+        return $data;
+    }
+
+    public static function canGenerateReceiptPdf(): bool
+    {
+        return (bool) apply_filters(
+            'fluent_cart/pdf/can_generate_receipt',
+            App::isProActive() && defined('FLUENT_PDF')
+        );
+    }
+
+}

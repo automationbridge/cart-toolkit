@@ -1,0 +1,170 @@
+<?php
+
+namespace FluentCart\Database\Migrations;
+
+use FluentCart\App\Models\Subscription;
+class SubscriptionsMigrator extends Migrator
+{
+
+    public static string $tableName = "fct_subscriptions";
+
+
+    const CUSTOMER_RECOVERY_INDEX = 'idx_subscriptions_customer_recovery';
+
+    public static function getSqlSchema(): string
+    {
+        $indexPrefix = static::getDbPrefix() . 'fct_index_';
+
+        return "`id` BIGINT UNSIGNED NOT NULL PRIMARY KEY AUTO_INCREMENT,
+                `uuid` VARCHAR(100) NOT NULL,
+                `customer_id` BIGINT(20) UNSIGNED NOT NULL,
+                `parent_order_id` BIGINT(20) UNSIGNED NOT NULL,
+                `product_id` BIGINT(20) UNSIGNED NOT NULL,
+                `item_name` TEXT NOT NULL,
+                `currency` VARCHAR(10) NOT NULL DEFAULT '',
+                `quantity` INT NOT NULL DEFAULT '1',
+                `variation_id` BIGINT(20) UNSIGNED NOT NULL,
+                `billing_interval` VARCHAR(45) NULL,
+                `signup_fee` BIGINT UNSIGNED NOT NULL DEFAULT 0,
+                `initial_tax_total` BIGINT UNSIGNED NOT NULL DEFAULT 0,
+                `recurring_amount` BIGINT UNSIGNED NOT NULL DEFAULT 0,
+                `recurring_tax_total` BIGINT UNSIGNED NOT NULL DEFAULT 0,
+                `recurring_total` BIGINT UNSIGNED NOT NULL DEFAULT 0,
+                `bill_times` BIGINT(20) UNSIGNED NOT NULL DEFAULT 0,
+                `bill_count` INT UNSIGNED NOT NULL DEFAULT 0,
+                `expire_at` DATETIME NULL,
+                `trial_ends_at` DATETIME NULL,
+                `canceled_at` DATETIME NULL,
+                `restored_at` DATETIME NULL,
+                `collection_method` ENUM('automatic', 'manual', 'system') NOT NULL DEFAULT 'automatic',
+                `next_billing_date` DATETIME NULL,
+                `trial_days` INT(10) UNSIGNED NOT NULL DEFAULT 0,
+                `vendor_customer_id` VARCHAR(45) NULL,
+                `vendor_plan_id` VARCHAR(45) NULL,
+                `vendor_subscription_id` VARCHAR(45) NULL,
+                `status` VARCHAR(45) NULL,
+                `original_plan` LONGTEXT NULL,
+                `vendor_response` LONGTEXT NULL,
+                `current_payment_method` VARCHAR(45) NULL,
+                `config` json DEFAULT NULL,
+                `created_at` DATETIME NULL,
+                `updated_at` DATETIME NULL,
+
+                 INDEX `{$indexPrefix}_order_subscription_idx` (`parent_order_id` ASC),
+                 INDEX `{$indexPrefix}vendor_subscription_id_idx` (`vendor_subscription_id` ASC),
+                 INDEX `{$indexPrefix}_expiry_scan_idx` (`status`, `next_billing_date`, `id`),
+                 INDEX `{$indexPrefix}collection_method_idx` (`collection_method`),
+                 INDEX `{$indexPrefix}currency_idx` (`currency`),
+                 INDEX `" . self::CUSTOMER_RECOVERY_INDEX . "` (`customer_id` ASC, `id` ASC)";
+    }
+
+    public static function migrated()
+    {
+        static::addCustomerRecoveryIndex();
+        static::addUuidColumn();
+        static::renameInitialAmountToSignupFee();
+        static::backfillEmptyUuids();
+        static::addVendorSubscriptionIdIndex();
+        static::addExpiryScanIndex();
+        static::addCollectionMethodIndex();
+        static::addCurrencyColumn();
+    }
+
+    /**
+     * The subscription's presentment currency, promoted out of the
+     * `config.currency` JSON so MRR and churn can group by it. Existing rows
+     * keep '' until the `subscription_currency` data backfill copies the
+     * parent order's currency.
+     */
+    public static function addCurrencyColumn()
+    {
+        // "ALTER TABLE %i ADD COLUMN `currency` VARCHAR(10) NOT NULL DEFAULT '' AFTER `item_name`"
+        static::addColumnIfNotExists('currency', "VARCHAR(10) NOT NULL DEFAULT ''", 'item_name');
+
+        static::addIndexIfNotExists(
+            static::getDbPrefix() . 'fct_index_currency_idx',
+            'currency'
+        );
+    }
+
+    public static function hasCurrencyColumn(): bool
+    {
+        return static::getColumnType('currency') !== '';
+    }
+
+    // Serves the store-managed cron guard: whereIn(collection_method,[manual,system])->exists().
+    // Online DDL, builds over existing rows; column is NOT NULL so no legacy backfill.
+    public static function addCollectionMethodIndex()
+    {
+        static::addIndexIfNotExists(
+            static::getDbPrefix() . 'fct_index_collection_method_idx',
+            'collection_method'
+        );
+    }
+
+    public static function addVendorSubscriptionIdIndex()
+    {
+        static::addIndexIfNotExists(
+            static::getDbPrefix() . 'fct_index_vendor_subscription_id_idx',
+            'vendor_subscription_id'
+        );
+    }
+
+    public static function addExpiryScanIndex()
+    {
+        static::addIndexIfNotExists(
+            static::getDbPrefix() . 'fct_index_expiry_scan_idx',
+            ['status', 'next_billing_date', 'id']
+        );
+    }
+
+    public static function addUuidColumn()
+    {
+        // "ALTER TABLE %i ADD COLUMN `uuid` VARCHAR(100) NOT NULL DEFAULT '' AFTER `id`"
+        static::addColumnIfNotExists('uuid', "VARCHAR(100) NOT NULL DEFAULT ''", 'id');
+    }
+
+    public static function renameInitialAmountToSignupFee()
+    {
+        // "ALTER TABLE %i CHANGE `initial_amount` `signup_fee` BIGINT UNSIGNED NOT NULL DEFAULT 0"
+        static::renameColumnIfExists('initial_amount', 'signup_fee', 'BIGINT UNSIGNED NOT NULL DEFAULT 0');
+    }
+
+    public static function backfillEmptyUuids()
+    {
+        $chunkSize = 500;
+
+        do {
+            $subscriptions = Subscription::select('id')
+                ->where(function ($query) {
+                    $query->where('uuid', '')
+                          ->orWhereNull('uuid');
+                })
+                ->limit($chunkSize)
+                ->get();
+
+            if ($subscriptions->isEmpty()) {
+                break;
+            }
+
+            $uuids = [];
+            foreach ($subscriptions as $subscription) {
+                $uuids[] = [
+                    'id'   => $subscription->id,
+                    'uuid' => md5(time() . wp_generate_uuid4())
+                ];
+            }
+
+            (new Subscription())->batchUpdate($uuids);
+        } while ($subscriptions->count() >= $chunkSize);
+    }
+    public static function addCustomerRecoveryIndex(): void
+    {
+        static::addIndexIfNotExists(self::CUSTOMER_RECOVERY_INDEX, ['customer_id', 'id']);
+    }
+
+    public static function hasCustomerRecoveryIndex(): bool
+    {
+        return static::hasIndex(self::CUSTOMER_RECOVERY_INDEX);
+    }
+}

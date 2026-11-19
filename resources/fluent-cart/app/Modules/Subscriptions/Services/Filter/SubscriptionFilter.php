@@ -1,0 +1,380 @@
+<?php
+
+namespace FluentCart\App\Modules\Subscriptions\Services\Filter;
+
+use FluentCart\Api\ModuleSettings;
+use FluentCart\App\App;
+use FluentCart\App\Helpers\Status;
+use FluentCart\App\Models\Subscription;
+use FluentCart\App\Modules\PaymentMethods\Core\GatewayManager;
+use FluentCart\App\Services\Filter\BaseFilter;
+use FluentCart\App\Services\Filter\LabelFilter;
+use FluentCart\Framework\Database\Orm\Builder;
+use FluentCart\Framework\Support\Arr;
+use FluentCart\Framework\Support\Str;
+
+class SubscriptionFilter extends BaseFilter
+{
+    public function applySimpleFilter(?string $search = null): void
+    {
+        $isApplied = $this->applySimpleOperatorFilter($search);
+        if ($isApplied) {
+            return;
+        }
+
+        $this->query->when($search ?? $this->search, function ($query, $search) {
+            return $query->where(function ($query) use ($search) {
+                if (in_array(strtolower($search), ['canceled', 'cancelled'])) {
+                    $query->orWhere('status', 'canceled');
+                } else {
+                    $query->orWhere('status', $search);
+                }
+
+                if (Str::of($search)->contains('#')) {
+                    $search = Str::of($search)->remove('#')->toString();
+                    $query->orWhere('id', 'like', '%' . $search . '%');
+                } else if (Str::of($search)->contains('@')) {
+                    $query->orWhereHas('customer', function ($query) use ($search) {
+                        $query->where('email', 'like', '%' . $search . '%');
+                    });
+                } else {
+                    // Search in other columns
+                    $columns = ['parent_order_id', 'item_name', 'vendor_subscription_id',
+                        'vendor_customer_id', 'vendor_plan_id', 'current_payment_method',
+                        'billing_interval', 'bill_count'];
+
+                    foreach ($columns as $column) {
+                        $query->orWhere($column, 'like', '%' . $search . '%');
+                    }
+
+                    // A partial email rarely contains "@" — the branch above
+                    // only covers full-ish addresses, so without this join a
+                    // search like "rare-zenith" could never match a customer
+                    // email. Additive orWhere: every local-column match above
+                    // still matches.
+                    $query->orWhereHas('customer', function ($query) use ($search) {
+                        $query->where('email', 'like', '%' . $search . '%');
+                    });
+                }
+            });
+        });
+    }
+
+    public function tabsMap(): array
+    {
+        return [
+            Status::SUBSCRIPTION_ACTIVE   => 'status',
+            Status::SUBSCRIPTION_PENDING  => 'status',
+            Status::SUBSCRIPTION_INTENDED => 'status',
+            Status::SUBSCRIPTION_PAUSED   => 'status',
+            Status::SUBSCRIPTION_TRIALING => 'status',
+            Status::SUBSCRIPTION_CANCELED => 'status',
+            Status::SUBSCRIPTION_FAILING  => 'status',
+            Status::SUBSCRIPTION_EXPIRING => 'status',
+            Status::SUBSCRIPTION_EXPIRED  => 'status',
+            // A finished installment plan
+            Status::SUBSCRIPTION_COMPLETED => 'status',
+            'installment'                  => 'plan_type',
+        ];
+    }
+
+    public function getModel(): string
+    {
+        return Subscription::class;
+    }
+
+    public static function getFilterName(): string
+    {
+        return 'subscriptions';
+    }
+
+    /**
+     * @return array<string, array<string, mixed>>
+     */
+    protected static function sortableColumns(): array
+    {
+        return [
+            'id'                => ['label' => __('Subscription ID', 'fluent-cart'), 'column' => 'id'],
+            'next_billing_date' => ['label' => __('Next Billing Date', 'fluent-cart'), 'column' => 'next_billing_date'],
+            'bill_count'        => ['label' => __('Bills Count', 'fluent-cart'), 'column' => 'bill_count'],
+            'created_at'        => ['label' => __('Created At', 'fluent-cart'), 'column' => 'created_at'],
+            'status'            => ['label' => __('Status', 'fluent-cart'), 'column' => 'status'],
+        ];
+    }
+
+    /**
+     * `GET /subscriptions` requires `subscriptions/view`, which says nothing
+     * about customers, so the customer relation carries its own bar through
+     * BOTH doors below.
+     *
+     * SCREEN key — `admin_subscription_list` loads what SubscriptionTable.js
+     * renders. PUBLIC key — `customer` is the plain relation name a consumer
+     * can reasonably ask a subscription endpoint for, and it was an accepted
+     * value before this allow-list existed; keeping it is what stops the
+     * conversion from silently narrowing a published response.
+     *
+     * Deliberately NOT allowlisted: `transactions` (gateway ids and card
+     * metadata), `license`/`licenses` (`license_key` serializes verbatim),
+     * `meta` (arbitrary stored keys).
+     *
+     * @return array<string, callable>
+     */
+    protected function allowedWiths(): array
+    {
+        return [
+            'admin_subscription_list' => [$this, 'adminSubscriptionList'],
+
+            'customer' => [$this, 'publicCustomer'],
+        ];
+    }
+
+    /**
+     * `GET /subscriptions`, sent by SubscriptionTable.js — the customer column
+     * is the only relation this screen renders.
+     *
+     * No select: Customer::$appends (`full_name`, `photo`, `country_name`,
+     * `formatted_address`, `user_link`) reads first_name, last_name, country,
+     * state, city, postcode and user_id.
+     *
+     * @param \FluentCart\Framework\Database\Orm\Builder $query
+     * @return \FluentCart\Framework\Database\Orm\Builder
+     */
+    protected function adminSubscriptionList($query)
+    {
+        // `subscriptions/view` says nothing about customers.
+        if ($this->userCanAny('customers/view')) {
+            $query->with(['customer']);
+        }
+
+        return $query;
+    }
+
+    /**
+     * `with[]=customer` — a public entry point, carrying the same
+     * `customers/view` bar as the screen key. A public name is not a way
+     * around the gate.
+     *
+     * @param \FluentCart\Framework\Database\Orm\Builder $query
+     * @return bool|\FluentCart\Framework\Database\Orm\Builder
+     */
+    protected function publicCustomer($query)
+    {
+        if (!$this->userCanAny('customers/view')) {
+            return false;
+        }
+
+        return $query->with(['customer']);
+    }
+
+    public function applyActiveViewFilter(?string $activeView = null): void
+    {
+        $activeView = $activeView ?? $this->activeView;
+        $tabsMap = $this->tabsMap();
+        //Apply Active Tab view
+        $this->query = $this->query->when($activeView, function (Builder $query, $activeView) use ($tabsMap) {
+            $query->where(function ($query) use ($tabsMap, $activeView) {
+                if ($tabsMap[$activeView] === 'plan_type') {
+                    $query->ofPlanType($activeView);
+                } elseif ('canceled' === $activeView && $tabsMap[$activeView] === 'status') {
+                    // active(Collection paused) is also considered as canceled
+                    $query->whereIn('status', [Status::SUBSCRIPTION_CANCELED]);
+                } else {
+                    $query->where($tabsMap[$activeView], $activeView);
+                }
+            });
+        });
+    }
+
+    public static function getSearchableFields(): array
+    {
+        return [
+            'id' => [
+                'column'      => 'ID',
+                'description' => __('Subscription ID', 'fluent-cart'),
+                'type'        => 'numeric'
+            ]
+        ];
+    }
+
+    public static function advanceFilterOptions(): array
+    {
+        $manager = GatewayManager::getInstance();
+        $paymentRoutes = $manager->getRoutes();
+        $paymentMethodOptions = [];
+        foreach ($paymentRoutes as $route) {
+            $paymentMethodOptions[$route['name']] = Arr::get($route, 'meta.title', $route['name']);
+        }
+
+        $filters = [
+            'subscription' => [
+                'label'    => __('Subscription', 'fluent-cart'),
+                'value'    => 'subscription',
+                'children' => [
+                    [
+                        'label'       => __('Subscription ID', 'fluent-cart'),
+                        'value'       => 'vendor_subscription_id',
+                        'type'        => 'text',
+                        'filter_type' => 'column',
+                        'column'      => 'vendor_subscription_id',
+                    ],
+                    [
+                        'label'       => __('Status', 'fluent-cart'),
+                        'value'       => 'status',
+                        'type'        => 'selections',
+                        'options'     => Status::getSubscriptionStatuses(),
+                        'is_multiple' => true,
+                    ],
+                    [
+                        'label'           => __('Order Items', 'fluent-cart'),
+                        'value'           => 'variation',
+                        'type'            => 'remote_tree_select',
+                        'column'          => 'id',
+                        'filter_type'     => 'relation',
+                        'relation'        => 'variation',
+                        'remote_data_key' => 'product_variations',
+                        'limit'           => 10,
+                    ],
+                    [
+                        'label'       => __('Plan Type', 'fluent-cart'),
+                        'value'       => 'plan_type',
+                        'type'        => 'selections',
+                        'filter_type' => 'custom',
+                        'options'     => [
+                            'installment' => __('Installment', 'fluent-cart'),
+                            'recurring'   => __('Recurring', 'fluent-cart'),
+                        ],
+                        'is_multiple' => true,
+                        'is_only_in'  => true,
+                        'callback'    => function ($query, $data) {
+                            $types = array_values(array_intersect((array) Arr::get($data, 'value', []), ['installment', 'recurring']));
+                            $operator = Arr::get($data, 'operator');
+                            $exclude = in_array($operator, ['not_in', 'not_contains', 'not_in_all'], true);
+                            if (count($types) === 1) {
+                                $query->ofPlanType($exclude ? ($types[0] === 'installment' ? 'recurring' : 'installment') : $types[0]);
+                            } elseif (count($types) === 2 && ($exclude || $operator === 'in_all')) {
+                                // A plan is one type: excluding both, or needing both at once, matches nothing
+                                $query->whereRaw('1 = 0');
+                            }
+                        },
+                    ],
+                    [
+                        'label'       => __('Billing Interval', 'fluent-cart'),
+                        'value'       => 'billing_interval',
+                        'type'        => 'selections',
+                        'options'     => [
+                            'yearly'      => __('Yearly', 'fluent-cart'),
+                            'half_yearly' => __('Half Yearly', 'fluent-cart'),
+                            'quarterly'   => __('Quarterly', 'fluent-cart'),
+                            'monthly'     => __('Monthly', 'fluent-cart'),
+                            'weekly'      => __('Weekly', 'fluent-cart'),
+                            'daily'       => __('Daily', 'fluent-cart'),
+                        ],
+                        'is_multiple' => true,
+                    ],
+                    [
+                        'label'       => __('Payment Method', 'fluent-cart'),
+                        'value'       => 'current_payment_method',
+                        'type'        => 'selections',
+                        'options'     => $paymentMethodOptions,
+                        'is_multiple' => true,
+                    ],
+                    [
+                        'label'       => __('Created At', 'fluent-cart'),
+                        'value'       => 'created_at',
+                        'type'        => 'dates',
+                        'filter_type' => 'date',
+                    ],
+                    [
+                        'label'       => __('Next Billing Date', 'fluent-cart'),
+                        'value'       => 'next_billing_date',
+                        'type'        => 'dates',
+                        'filter_type' => 'date',
+                    ],
+                    [
+                        'label' => __('Bill Count', 'fluent-cart'),
+                        'value' => 'bill_count',
+                        'type'  => 'numeric',
+                    ],
+                    [
+                        'label'       => __('Status', 'fluent-cart'),
+                        'value'       => 'status',
+                        'type'        => 'selections',
+                        'options'     => Status::getSubscriptionStatuses(),
+                        'is_multiple' => true,
+                    ],
+                ],
+            ],
+            'transaction'  => [
+                'label'    => __('Transaction Property', 'fluent-cart'),
+                'value'    => 'transaction',
+                'children' => [
+                    [
+                        'label'       => __('Transaction Id', 'fluent-cart'),
+                        'value'       => 'transaction_id',
+                        'type'        => 'text',
+                        'filter_type' => 'relation',
+                        'column'      => 'vendor_charge_id',
+                        'relation'    => 'transactions',
+                    ],
+                    [
+                        'label'       => __('Payment method', 'fluent-cart'),
+                        'value'       => 'current_payment_method',
+                        'type'        => 'selections',
+                        'options'     => $paymentMethodOptions,
+                        'is_multiple' => true,
+                    ],
+                ],
+            ],
+            'product'      => [
+                'label'    => __('Products', 'fluent-cart'),
+                'value'    => 'product',
+                'children' => [
+                    [
+                        'label'           => __('By Products', 'fluent-cart'),
+                        'value'           => 'product',
+                        'type'            => 'remote_tree_select',
+                        'column'          => 'variation_id',
+                        'filter_type'     => 'relation',
+                        'relation'        => 'variation',
+                        'remote_data_key' => 'product_variations',
+                        'limit'           => 10,
+                    ],
+                ],
+            ],
+        ];
+
+        if (ModuleSettings::isActive('license') && App::isProActive()) {
+            $filters['license'] = [
+                'label'    => __('License Property', 'fluent-cart'),
+                'value'    => 'license',
+                'children' => [
+                    [
+                        'label'       => __('License key', 'fluent-cart'),
+                        'value'       => 'license_key',
+                        'type'        => 'text',
+                        'filter_type' => 'relation',
+                        'column'      => 'license_key',
+                        'relation'    => 'license',
+                    ],
+
+                    [
+                        'label'       => __('License Status', 'fluent-cart'),
+                        'value'       => 'license_status',
+                        'type'        => 'selections',
+                        'filter_type' => 'relation',
+                        'column'      => 'status',
+                        'relation'    => 'license',
+                        'options'     => [
+                            Status::LICENSE_ACTIVE   => _x('Active', 'License status', 'fluent-cart'),
+                            Status::LICENSE_DISABLED => _x('Disabled', 'License status', 'fluent-cart'),
+                            Status::LICENSE_EXPIRED  => _x('Expired', 'License status', 'fluent-cart'),
+                        ],
+                        'is_multiple' => true,
+                        'is_only_in'  => true
+                    ]
+                ],
+            ];
+        }
+        return LabelFilter::advanceFilterOptionsForOther($filters);
+    }
+}

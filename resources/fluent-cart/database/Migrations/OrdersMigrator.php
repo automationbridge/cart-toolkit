@@ -1,0 +1,138 @@
+<?php
+
+namespace FluentCart\Database\Migrations;
+
+class OrdersMigrator extends Migrator
+{
+
+    public static string $tableName = 'fct_orders';
+
+
+    public static function getSqlSchema(): string
+    {
+        $indexPrefix = static::getDbPrefix() . 'fct_ord_';
+
+        return "`id` BIGINT UNSIGNED NOT NULL PRIMARY KEY AUTO_INCREMENT,
+                `status` VARCHAR(20) NOT NULL DEFAULT 'draft' COMMENT 'draft / pending / on-hold / processing / completed / failed / refunded / partial-refund',
+                `parent_id` BIGINT UNSIGNED NULL,
+                `receipt_number` BIGINT UNSIGNED NULL,
+                `invoice_no` VARCHAR(192) NULL DEFAULT '',
+                `fulfillment_type` VARCHAR(20) NULL DEFAULT 'physical',
+                `type` VARCHAR(20) NOT NULL DEFAULT 'payment',
+                `mode` ENUM('live', 'test') NOT NULL DEFAULT 'live' COMMENT 'live / test',
+                `shipping_status` VARCHAR(20) NOT NULL DEFAULT '' COMMENT 'unshipped / shipped / delivered / unshippable',
+                `customer_id` BIGINT UNSIGNED NULL,
+                `payment_method` VARCHAR(100) NOT NULL,
+                `payment_status` VARCHAR(20) NOT NULL DEFAULT '',
+                `payment_method_title` VARCHAR(100) NOT NULL,
+                `currency` VARCHAR(10) NOT NULL,
+                `subtotal` BIGINT NOT NULL DEFAULT '0',
+                `discount_tax` BIGINT NOT NULL DEFAULT '0',
+                `manual_discount_total` BIGINT NOT NULL DEFAULT '0',
+                `coupon_discount_total` BIGINT NOT NULL DEFAULT '0',
+                `shipping_tax` BIGINT NOT NULL DEFAULT '0',
+                `shipping_total` BIGINT NOT NULL DEFAULT '0',
+                `fee_total` BIGINT NOT NULL DEFAULT '0',
+                `tax_total` BIGINT NOT NULL DEFAULT '0',
+                `total_amount` BIGINT NOT NULL DEFAULT '0',
+                `total_paid` BIGINT NOT NULL DEFAULT '0',
+                `total_refund` BIGINT NOT NULL DEFAULT '0',
+                `rate` DECIMAL(24,12) NOT NULL DEFAULT '1.000000000000',
+                `tax_behavior` TINYINT(1) NOT NULL DEFAULT 0 COMMENT '0 => no_tax, 1 => exclusive, 2 => inclusive',
+                `note` TEXT NOT NULL DEFAULT '',
+                `ip_address` TEXT NOT NULL DEFAULT '',
+                `completed_at` DATETIME NULL DEFAULT NULL,
+                `refunded_at` DATETIME NULL DEFAULT NULL,
+                `uuid` VARCHAR(100) NOT NULL,
+                `config` json DEFAULT NULL,
+                `created_at` DATETIME NULL,
+                `updated_at` DATETIME NULL,
+
+                INDEX `{$indexPrefix}_invoice_no` (`invoice_no`(191) ASC),
+                INDEX `{$indexPrefix}_status_type` (`type` ASC),
+                INDEX `{$indexPrefix}_customer_id` (`customer_id` ASC),
+                INDEX `{$indexPrefix}_date_created_completed` (`created_at` ASC, `completed_at` ASC),
+                INDEX `{$indexPrefix}_uuid` (`uuid` ASC),
+                INDEX `{$indexPrefix}_currency_created` (`currency` ASC, `created_at` ASC)";
+    }
+
+    public static function migrated()
+    {
+        static::addFeeTotalColumn();
+        static::addTaxBehaviorColumn();
+        static::addReceiptNumberColumn();
+        static::renameDiscountTotalColumn();
+        static::addPaymentStatusIndex();
+        static::addUuidIndex();
+        static::widenRateColumn();
+        static::addCurrencyCreatedIndex();
+    }
+
+    /**
+     * Currency-scoped reports filter on currency + a created_at range
+     * (dev-docs/multi-currency/02-database-schema.md).
+     */
+    public static function addCurrencyCreatedIndex()
+    {
+        static::addIndexIfNotExists(static::getDbPrefix() . 'fct_ord__currency_created', ['currency', 'created_at']);
+    }
+
+    /**
+     * `rate` holds the base->presentment exchange rate frozen at order
+     * creation. DECIMAL(12,4) rounds IDR->USD (~0.000061) to 0.0001 — a 64%
+     * error — so it is widened before anything writes a real rate. Every
+     * existing value is 1, so the change is lossless.
+     */
+    public static function widenRateColumn()
+    {
+        if (static::getColumnType('rate') === 'decimal(24,12)') {
+            return;
+        }
+
+        static::modifyColumnIfExists('rate', "DECIMAL(24,12) NOT NULL DEFAULT '1.000000000000'");
+    }
+
+    public static function hasWideRateColumn(): bool
+    {
+        return static::getColumnType('rate') === 'decimal(24,12)';
+    }
+
+    public static function addFeeTotalColumn()
+    {
+        // "ALTER TABLE %i ADD COLUMN `fee_total` BIGINT NOT NULL DEFAULT '0' AFTER `shipping_total`"
+        static::addColumnIfNotExists('fee_total', "BIGINT NOT NULL DEFAULT '0'", 'shipping_total');
+    }
+
+    public static function addTaxBehaviorColumn()
+    {
+        // "ALTER TABLE %i ADD COLUMN `tax_behavior` TINYINT(1) NOT NULL DEFAULT 0 COMMENT '...' AFTER `rate`"
+        static::addColumnIfNotExists('tax_behavior', "TINYINT(1) NOT NULL DEFAULT 0 COMMENT '0 => no_tax, 1 => exclusive, 2 => inclusive'", 'rate');
+    }
+
+    public static function addReceiptNumberColumn()
+    {
+        // "ALTER TABLE %i ADD COLUMN `receipt_number` BIGINT NULL AFTER `parent_id`"
+        static::addColumnIfNotExists('receipt_number', 'BIGINT NULL', 'parent_id');
+    }
+
+    public static function renameDiscountTotalColumn()
+    {
+        // "ALTER TABLE %i CHANGE `discount_total` `manual_discount_total` BIGINT NOT NULL DEFAULT '0'"
+        static::renameColumnIfExists('discount_total', 'manual_discount_total', "BIGINT NOT NULL DEFAULT '0'");
+    }
+
+    public static function addPaymentStatusIndex()
+    {
+        // "ALTER TABLE %i ADD INDEX `fct_payment_status` (`payment_status`, `id`)"
+        static::addIndexIfNotExists('fct_payment_status', ['payment_status', 'id']);
+    }
+
+    public static function addUuidIndex()
+    {
+        // "ALTER TABLE %i ADD INDEX `{prefix}fct_ord__uuid` (`uuid`)"
+        // Non-unique on purpose: speeds up the uuid collision check and every
+        // by-value order lookup (receipts, webhooks, customer profile) without
+        // enforcing a UNIQUE constraint.
+        static::addIndexIfNotExists(static::getDbPrefix() . 'fct_ord__uuid', 'uuid');
+    }
+}

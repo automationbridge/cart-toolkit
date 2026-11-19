@@ -1,0 +1,450 @@
+<?php
+
+namespace FluentCart\App\Modules\Templating;
+
+use FluentCart\Api\Resource\ShopResource;
+use FluentCart\Api\StoreSettings;
+use FluentCart\Api\Taxonomy;
+use FluentCart\App\CPT\FluentProducts;
+//use FluentCart\App\Hooks\Handlers\ShortCodes\Buttons\AddToCartShortcode;
+use FluentCart\App\Hooks\Handlers\ShortCodes\SingleProductShortCode;
+use FluentCart\App\Modules\Data\ProductDataSetup;
+use FluentCart\App\Modules\Data\ProductQuery;
+use FluentCart\App\Services\Renderer\ProductCardLayoutPresets;
+use FluentCart\App\Services\Renderer\ProductListRenderer;
+use FluentCart\App\Services\Renderer\ProductRenderer;
+use FluentCart\App\Services\Renderer\ShopAppRenderer;
+use FluentCart\App\Services\Schema\ProductSchema;
+use FluentCart\App\Services\TemplateService;
+use FluentCart\Framework\Support\Arr;
+
+class TemplateActions
+{
+    public function register()
+    {
+        add_action('fluent_cart/template/main_content', [$this, 'renderMainContent']);
+        add_action('fluent_cart/template/product_archive', [$this, 'renderProductArchive']);
+        add_action('fluent_cart/product/render_product_header', [$this, 'renderProductHeader']);
+        // Block themes render reviews from the product template, so the
+        // built-in listener is not attached there — the hook still fires for
+        // third-party listeners. Safe to decide here: the theme is resolved
+        // at after_setup_theme, before init runs this.
+        if (!function_exists('wp_is_block_theme') || !wp_is_block_theme()) {
+            add_action('fluent_cart/product/after_product_content', [$this, 'renderProductReviews']);
+        }
+        add_action('wp_head', [$this, 'renderProductJsonLd']);
+
+        // Universal hook for after_product_content — fires on both classic and block themes
+        // Block themes render <!-- wp:post-content --> which runs the_content filter
+        add_filter('the_content', function ($content) {
+            if (!is_singular('fluent-products')) {
+                return $content;
+            }
+
+            global $post;
+
+            if (!$post || $post->post_type !== FluentProducts::CPT_NAME) {
+                return $content;
+            }
+
+            ob_start();
+            do_action('fluent_cart/product/after_product_content', $post->ID);
+            $extra = ob_get_clean();
+
+            if ($extra) {
+                $content .= $extra;
+            }
+
+            return $content;
+        }, 999);
+        
+        add_shortcode('fluent_cart_product_header', function ($atts = []) {
+            $atts = shortcode_atts([
+                'id' => 0,
+            ], $atts);
+
+            $productId = absint($atts['id']);
+
+            if (!$productId) {
+                $productId = get_the_ID();
+            }
+
+            if (!$productId) {
+                return 'Product ID not found';
+            }
+
+            $product = ProductDataSetup::getProductModel($productId);
+            if (!$product || !$product->detail) {
+                return 'Product not found';
+            }
+
+            ob_start();
+            $this->renderProductHeader($product->ID);
+            $content = ob_get_clean();
+
+            return $this->tempFixShortcodeContent($content);
+        });
+
+        add_shortcode('fluent_cart_related_products', function ($atts = []) {
+            $atts = shortcode_atts([
+                'id'           => 0,
+                'card_layout'  => '',
+                'price_format' => 'starts_from',
+            ] + ProductCardLayoutPresets::SHORTCODE_CARD_ATTRIBUTES, $atts);
+
+            $productId = absint($atts['id']);
+
+            if (!$productId) {
+                $productId = get_the_ID();
+            }
+
+            if (!$productId) {
+                return __('Product ID not found', 'fluent-cart');
+            }
+
+            $product = ProductDataSetup::getProductModel($productId);
+            if (!$product || !$product->detail) {
+                return __('Product not found', 'fluent-cart');
+            }
+
+            // On the product page this shortcode is the block theme's
+            // equivalent of what filterSingleProductContent appends for
+            // classic themes, so it answers to the same setting and filter.
+            // Placed anywhere else it is an explicit choice and still renders.
+            if (is_singular(FluentProducts::CPT_NAME)) {
+                $showRelevant = (new StoreSettings())->get('show_relevant_product_in_single_page') == 'yes';
+                $showRelevant = apply_filters(
+                    'fluent_cart/single_product_page/show_relevant_products',
+                    $showRelevant,
+                    $productId
+                );
+
+                if (!$showRelevant) {
+                    return '';
+                }
+            }
+
+            $products = ShopResource::getSimilarProducts($productId, false);
+            if (empty($products)) {
+                return '';
+            }
+
+            // An unknown layout keeps the standard card, as [fluent_cart_products] does. Without the attribute,
+            // the site's own choice applies, as on the classic theme's list below.
+            $cardLayout = sanitize_key($atts['card_layout'] !== '' ? $atts['card_layout'] : $this->relatedCardLayout($productId));
+            $listConfig = ['rating_context' => 'relevant'];
+            if (ProductCardLayoutPresets::cardBlock($cardLayout)) {
+                $listConfig['card_layout'] = $cardLayout;
+                $listConfig['layout_price_format'] = sanitize_key($atts['price_format']);
+                $listConfig['layout_options'] = ProductCardLayoutPresets::shortcodeCardOptions($atts);
+            }
+
+            ob_start();
+            (new ProductListRenderer(
+                $products,
+                __('Related Products', 'fluent-cart'),
+                'fct-similar-product-list-container',
+                $listConfig
+            ))->render();
+
+            $content = ob_get_clean();
+
+            return $this->tempFixShortcodeContent($content);
+        });
+
+        add_action('fluent_cart/template/before_content', [$this, 'renderArchiveHeader']);
+
+    }
+
+    public function renderMainContent()
+    {
+        $isTaxPages = is_tax(get_object_taxonomies('fluent-products'));
+        if ($isTaxPages) {
+            do_action('fluent_cart/template/product_archive');
+        }
+    }
+
+    public function renderArchiveHeader()
+    {
+        if (TemplateService::getCurrentFcPageType() !== 'product_taxonomy') {
+            return;
+        }
+
+        ?>
+        <div class="fct-archive-header-wrap">
+            <h1 class="fct-archive-title">
+                <?php
+                $queried_object = get_queried_object();
+                if ($queried_object && !empty($queried_object->name)) {
+                    echo esc_html($queried_object->name);
+                } else {
+                    echo esc_html(get_the_archive_title());
+                }
+                ?>
+            </h1>
+            <?php
+            $termDescription = term_description();
+            if ($termDescription) {
+                ?>
+                <div class="fct-archive-description">
+                    <?php echo wp_kses_post(wpautop($termDescription)); ?>
+                </div>
+                <?php
+            }
+            ?>
+        </div>
+        <?php
+
+    }
+
+    public function renderProductArchive()
+    {
+        $queried_object = get_queried_object();
+
+        if (empty($queried_object->taxonomy) || !is_tax(get_object_taxonomies('fluent-products'))) {
+            return;
+        }
+
+        $productsQuery = (new ProductQuery([
+            'is_main_query' => true,
+            'paginate'      => 'simple',
+            'with'          => ['detail', 'variants'],
+            // Same cap as the renderer and AJAX pages, or page 2 repeats products.
+            'per_page'      => ShopResource::clampPerPage(get_option('posts_per_page')),
+        ]));
+
+        $publicTaxonomies = Taxonomy::getTaxonomies();
+
+
+        unset($publicTaxonomies[$queried_object->taxonomy]);
+
+        $connectedTerms = $productsQuery->getConnectedTerms(array_values($publicTaxonomies), true);
+        //TODO: also add the child terms
+        $taxFilters = [];
+
+        foreach ($connectedTerms as $taxonomyName => $term) {
+
+            $taxObj = get_taxonomy($taxonomyName);
+            if (!$taxObj) {
+                continue;
+            }
+
+            $taxFilters[$taxonomyName] = [
+                'options' => $term['terms'],
+                'term' => $taxonomyName,
+                'label'   => $taxObj->label
+            ];
+        }
+
+        $products = $productsQuery->get();
+        // A classic theme's archive keeps the standard card unless a site picks a layout (key as in [fluent_cart_products card_layout]).
+        $cardLayout = apply_filters('fluent_cart/product_archive/card_layout', '', ['term' => $queried_object]);
+        $cardLayout = is_string($cardLayout) ? sanitize_key($cardLayout) : '';
+        (new ShopAppRenderer([
+            'products' => $products,
+            'total'    => $products->total(),
+        ], [
+            'card_layout'     => ProductCardLayoutPresets::cardBlock($cardLayout) ? $cardLayout : '',
+            'grid_only'       => ProductCardLayoutPresets::isGridOnly($cardLayout),
+            'default_filters' => $productsQuery->getDefaultFilters(),
+            'custom_filters'  => [
+                'taxonomies'  => [
+                    $taxFilters
+                ],
+                'search'      => true,
+                'price_range' => true,
+            ],
+            'pagination_type' => 'simple'
+        ]))->render();
+    }
+
+    public function initSingleProductHooks()
+    {
+        add_filter('the_title', function ($title, $post_id) {
+            if (apply_filters('fluent_cart/disable_auto_single_product_page', false)) {
+                return $title;
+            }
+
+            global $post;
+            global $wp_query;
+
+            if (
+                // this is the main query for a single product page
+                $wp_query->is_main_query()
+                // post_id is get_queried id
+                && $post_id == $wp_query->get_queried_object_id()
+                && $post->post_type === FluentProducts::CPT_NAME
+            ) {
+                return '';
+            }
+
+            return $title;
+        }, 10, 2);
+        add_filter('get_the_excerpt', function ($excerpt, $post) {
+            if (apply_filters('fluent_cart/disable_auto_single_product_page', false)) {
+                return $excerpt;
+            }
+
+            global $wp_query;
+
+            if (
+                $wp_query->is_main_query()
+                && $post->ID == $wp_query->get_queried_object_id()
+                && $post->post_type === FluentProducts::CPT_NAME
+            ) {
+                return '';
+            }
+
+            return $excerpt;
+        }, 10, 2);
+
+        add_filter('the_content', [$this, 'filterSingleProductContent'], 999);
+    }
+
+    // The card layout a site picks for Related Products on the single product page; empty keeps the standard card.
+    private function relatedCardLayout($productId): string
+    {
+        $layout = apply_filters('fluent_cart/single_product_page/related_card_layout', '', ['product_id' => (int) $productId]);
+        return is_string($layout) ? $layout : '';
+    }
+
+    public function filterSingleProductContent($content)
+    {
+        if (apply_filters('fluent_cart/disable_auto_single_product_page', false)) {
+            return $content;
+        }
+
+        global $post;
+        global $wp_query;
+
+        if (!$wp_query->is_main_query() && $post->post_type !== FluentProducts::CPT_NAME) {
+            return $content;
+        }
+
+        remove_filter('the_content', [$this, 'filterSingleProductContent']);
+        ob_start();
+        do_action('fluent_cart/product/render_product_header', $post->ID);
+        $headerContent = ob_get_clean();
+        $content = $headerContent . $content;
+
+        $storeSettings = new StoreSettings();
+
+        $showRelevant = $storeSettings->get('show_relevant_product_in_single_page') == 'yes';
+        $showRelevant = apply_filters('fluent_cart/single_product_page/show_relevant_products', $showRelevant, $post->ID);
+        if ($showRelevant) {
+            $products = ShopResource::getSimilarProducts($post->ID, false);
+            // Standard card unless a site picks a layout (key as in [fluent_cart_related_products card_layout]).
+            $cardLayout = sanitize_key($this->relatedCardLayout($post->ID));
+            $listConfig = ['rating_context' => 'relevant'];
+            if (ProductCardLayoutPresets::cardBlock($cardLayout)) {
+                $listConfig['card_layout'] = $cardLayout;
+            }
+            ob_start();
+            (new ProductListRenderer(
+                $products,
+                __('Related Products', 'fluent-cart'),
+                'fct-similar-product-list-container',
+                $listConfig
+            ))->render();
+
+            $relevantProducts = ob_get_clean();
+            $content .= $relevantProducts;
+        }
+
+        return $content;
+    }
+
+    public function renderProductHeader($productId = false)
+    {
+        if (!$productId) {
+            $productId = get_the_ID();
+        }
+
+        if (!$productId) {
+            return;
+        }
+
+        $product = ProductDataSetup::getProductModel($productId);
+        if (!$product || !$product->detail) {
+            return;
+        }
+
+        $storeSettings = new StoreSettings();
+        (new ProductRenderer($product, [
+            'view_type'   => $storeSettings->get('variation_view', 'both'),
+            'column_type' => $storeSettings->get('variation_columns', 'masonry')
+        ]))->render();
+    }
+
+    private function tempFixShortcodeContent($content)
+    {
+
+        if (!$content) {
+            return $content;
+        }
+
+        // Remove empty <p> tags (including those with whitespace), <br> tags, and new lines
+        $cleaned = preg_replace([
+            '/<p>\s*<\/p>/i',             // Remove empty <p> tags
+            '/<p>\s*<br\s*\/?>\s*<\/p>/i', // Remove <p> tags containing only <br>
+            '/<br\s*\/?>/i',              // Remove all <br> tags
+            '/[\r\n]+/'                   // Remove all new lines
+        ], '', $content);
+
+        // Remove extra whitespace between tags to clean up the output
+        return preg_replace('/>\s+</', '><', $cleaned);
+    }
+
+    /**
+     * Whether the product page should carry its review section at all.
+     *
+     * Sits beside the relevant-products switch in Product Page settings and
+     * works the same way, so one control governs the section wherever it is
+     * rendered from — a review block, or the append below.
+     *
+     * @param int $postId
+     * @return bool
+     */
+    public static function shouldShowReviewsOnProductPage($postId): bool
+    {
+        $show = (new StoreSettings())->get('show_reviews_in_single_page', 'yes') == 'yes';
+
+        return (bool) apply_filters('fluent_cart/single_product_page/show_reviews', $show, $postId);
+    }
+
+    private function isReviewModuleAvailable()
+    {
+        return \FluentCart\Api\ModuleSettings::isActive('reviews')
+            && class_exists(\FluentCart\App\Services\ProductReviewService::class);
+    }
+
+    public function renderProductReviews($postId)
+    {
+        if (!$postId || !$this->isReviewModuleAvailable()) {
+            return;
+        }
+
+        $renderer = new \FluentCart\App\Services\Renderer\ProductReviewRenderer($postId);
+        $renderer->render();
+        $renderer->renderForm();
+    }
+
+    public function renderProductJsonLd()
+    {
+        if (!is_singular(\FluentCart\App\CPT\FluentProducts::CPT_NAME)) {
+            return;
+        }
+
+        $postId = get_the_ID();
+        if (!$postId) {
+            return;
+        }
+
+        // The node itself — product, offers, aggregate rating, the reviews
+        // the page shows — is ProductSchema's; this is only the page gate.
+        // The reviews module gate lives there too, on the review parts
+        // alone: a product is for sale whether or not it takes reviews.
+        ProductSchema::render($postId);
+    }
+
+}

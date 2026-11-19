@@ -1,0 +1,242 @@
+<?php
+
+namespace FluentCart\App\Http\Requests;
+
+use FluentCart\Framework\Foundation\RequestGuard;
+use FluentCart\Framework\Support\Arr;
+use FluentCart\App\Services\Permission\PermissionManager;
+use FluentCart\App\Services\Theme\ColorPalette;
+use FluentCart\App\Services\Theme\RadiusPalette;
+
+class FluentMetaRequest extends RequestGuard
+{
+
+    /**
+     * @return array
+     */
+    public function rules()
+    {
+
+
+        $rulesMap = [
+            'store_setup' => [
+                'store_name'    => 'required|sanitizeText|maxLength:200',
+                'store_country' => 'required|sanitizeText|maxLength:200',
+                'seller_vat_id' => 'nullable|sanitizeText|maxLength:50',
+                'seller_tax_id' => 'nullable|sanitizeText|maxLength:50',
+            ]
+        ];
+
+        $rules = Arr::get($rulesMap, $this->get('settings_name'), []);
+
+        // The radius fields only show under Customize; a value hidden under
+        // another source is dropped by the sanitiser rather than blocking the save.
+        if ($this->get('settings_name') === 'appearance' && $this->get('appearance_source') === ColorPalette::SOURCE_CUSTOM) {
+            $rules = array_merge($rules, RadiusPalette::validationRules());
+        }
+//        $rules = [
+//            'object_id'   => 'integer|min:1',
+//            'object_type' => 'nullable|sanitizeText|max:50',
+//            'meta_key'    => 'nullable|sanitizeText|max:50',
+//            'meta_value'  => 'nullable|sanitizeText',
+//            'store_name'  => 'required|sanitizeText|max:200',
+//            'store_country' => 'required|sanitizeText|max:200',
+//        ];
+        return apply_filters('fluent_cart/store_settings/rules', $rules);
+    }
+
+
+    /**
+     * @return array
+     */
+    public function messages(): array
+    {
+        return [
+            'store_name.required'    => esc_html__('Store name is required.', 'fluent-cart'),
+            'store_country.required' => esc_html__('Store country is required.', 'fluent-cart'),
+        ];
+    }
+
+
+    /**
+     * @return array
+     */
+    public function sanitize(): array
+    {
+        $sanitizer = [
+            'object_type'                          => 'sanitize_text_field',
+            //phpcs:ignore WordPress.DB.SlowDBQuery.slow_db_query_meta_key
+            'meta_key'                             => 'sanitize_text_field',
+            'type'                                 => 'sanitize_text_field',
+            'default'                              => 'sanitize_text_field',
+            'store_name'                           => 'sanitize_text_field',
+            'company_name'                         => 'sanitize_text_field',
+            'legal_registration_id'               => 'sanitize_text_field',
+            'seller_vat_id'                        => 'sanitize_text_field',
+            'seller_tax_id'                        => 'sanitize_text_field',
+            'store_logo'                           => function ($value) {
+                if (!is_array($value)) {
+                    return '';
+                }
+                return [
+                    'id'    => sanitize_text_field(Arr::get($value, 'id')),
+                    'url'   => sanitize_url(Arr::get($value, 'url')),
+                    'title' => sanitize_text_field(Arr::get($value, 'title')),
+                ];
+            },
+            'checkout_button_text'                 => 'sanitize_text_field',
+            'view_cart_button_text'                => 'sanitize_text_field',
+            'note_for_user_account_creation'       => 'sanitize_text_field',
+            'cart_button_text'                     => 'sanitize_text_field',
+            'popup_button_text'                    => 'sanitize_text_field',
+            'out_of_stock_button_text'             => 'sanitize_text_field',
+            'thousand_separator'                   => 'sanitize_text_field',
+            'decimal_separator'                    => 'sanitize_text_field',
+            'currency_position'                    => 'sanitize_text_field',
+            'checkout_method_style'                => 'sanitize_text_field',
+            'require_logged_in'                    => 'sanitize_text_field',
+            'enable_modal_checkout'                => 'sanitize_text_field',
+            'show_cart_icon_in_nav'                => 'sanitize_text_field',
+            'show_cart_icon_in_body'               => 'sanitize_text_field',
+            'additional_address_field'             => 'sanitize_text_field',
+            'hide_coupon_field'                    => 'sanitize_text_field',
+            'user_account_creation_mode'           => 'sanitize_text_field',
+            'require_customer_email_verification' => function ($value) {
+                return $value === 'no' ? 'no' : 'yes';
+            },
+            'auto_login_after_account_creation'    => function ($value) {
+                return $value === 'yes' ? 'yes' : 'no';
+            },
+            'force_ssl'                            => 'sanitize_text_field',
+            'checkout_page_id'                     => 'intval',
+            'custom_payment_page_id'               => 'intval',
+            'cart_page_id'                         => 'intval',
+            'receipt_page_id'                      => 'intval',
+            'order_review_page_id'                 => 'intval',
+            'shop_page_id'                         => 'intval',
+            'customer_profile_page_id'             => 'intval',
+            'customer_profile_page_slug'           => 'sanitize_text_field',
+            'registration_page_id'                 => 'intval',
+            'login_page_id'                        => 'intval',
+            'plugin_activated_once'                => 'sanitize_text_field',
+            'rest_route'                           => 'sanitize_text_field',
+            'currency'                             => 'sanitize_text_field',
+            'store_address1'                       => 'sanitize_text_field',
+            'store_address2'                       => 'sanitize_text_field',
+            'store_city'                           => 'sanitize_text_field',
+            'store_country'                        => 'sanitize_text_field',
+            'store_postcode'                       => 'sanitize_text_field',
+            'store_state'                          => 'sanitize_text_field',
+            'template_settings_checkout_page_mode' => 'sanitize_text_field',
+            'show_relevant_product_in_single_page' => 'sanitize_text_field',
+            'show_relevant_product_in_modal'       => 'sanitize_text_field',
+            'show_reviews_in_single_page'          => 'sanitize_text_field',
+            'show_rating_in_shop'                  => 'sanitize_text_field',
+            'show_rating_in_relevant'              => 'sanitize_text_field',
+            'enable_early_payment_for_installment' => 'sanitize_text_field',
+            'subscription_management_mode'         => function ($value) {
+                $value = sanitize_text_field($value);
+                $allowed = ['gateway_managed', 'store_managed'];
+                return in_array($value, $allowed, true) ? $value : 'gateway_managed';
+            },
+            'subscription_system_charge'           => function ($value) {
+                $value = sanitize_text_field($value);
+                return in_array($value, ['yes', 'no'], true) ? $value : 'no';
+            },
+            'subscription_manual_fallback'         => function ($value) {
+                $value = sanitize_text_field($value);
+                return in_array($value, ['yes', 'no'], true) ? $value : 'no';
+            },
+            'order_mode'                           => 'sanitize_text_field',
+            'subscription_mode_guard'              => function ($value) {
+                $value = sanitize_text_field($value);
+                return in_array($value, ['yes', 'no'], true) ? $value : 'yes';
+            },
+            'variation_view'                       => 'sanitize_text_field',
+            'variation_columns'                    => 'sanitize_text_field',
+            'modules_settings'                     => 'sanitize_text_field',
+            'product_slug'                         => 'sanitize_text_field',
+            'min_receipt_number'                   => 'sanitize_text_field',
+            'inv_prefix'                           => 'sanitize_text_field',
+            'date_time_format_source'              => function ($value) {
+                $value = sanitize_text_field($value);
+                return in_array($value, ['fluent_cart', 'wordpress'], true) ? $value : 'fluent_cart';
+            },
+            'timezone_source'                      => function ($value) {
+                $value = sanitize_text_field($value);
+                return in_array($value, ['fluent_cart', 'wordpress'], true) ? $value : 'fluent_cart';
+            },
+            'weight_unit'                          => function ($value) {
+                if (!PermissionManager::hasPermission(['store/sensitive'])) {
+                    $stored = get_option('fluent_cart_store_settings', []);
+                    return $stored['weight_unit'] ?? 'kg';
+                }
+                $value = sanitize_text_field($value);
+                $allowed = ['kg', 'g', 'lbs', 'oz'];
+                return in_array($value, $allowed, true) ? $value : 'kg';
+            },
+            'dimension_unit'                       => function ($value) {
+                if (!PermissionManager::hasPermission(['store/sensitive'])) {
+                    $stored = get_option('fluent_cart_store_settings', []);
+                    return $stored['dimension_unit'] ?? 'cm';
+                }
+                $value = sanitize_text_field($value);
+                $allowed = ['cm', 'mm', 'in', 'm'];
+                return in_array($value, $allowed, true) ? $value : 'cm';
+            },
+            'enable_image_zoom_in_single_product'  => 'sanitize_text_field',
+            'enable_image_zoom_in_modal'           => 'sanitize_text_field',
+            'appearance_source'                    => function ($value) {
+                $value = sanitize_text_field($value);
+
+                return in_array($value, ColorPalette::sources(), true)
+                    ? $value
+                    : ColorPalette::SOURCE_DEFAULT;
+            },
+            'appearance_colors'                    => function ($value) {
+                if (!is_array($value)) {
+                    return [];
+                }
+
+                // Driven off the registry rather than the submitted keys, so an
+                // unknown property can never reach the storefront stylesheet.
+                $colors = [];
+
+                foreach (ColorPalette::globals() as $key => $definition) {
+                    $hex = sanitize_hex_color((string)Arr::get($value, $key, ''));
+
+                    // sanitize_hex_color() returns null for anything malformed
+                    // and '' for an empty picker; both mean "not set", which is
+                    // how a colour falls back to FluentCart's own default.
+                    if ($hex) {
+                        $colors[$key] = $hex;
+                    }
+                }
+
+                return $colors;
+            },
+            'appearance_radius'                    => function ($value) {
+                // Registry-driven like the colours: only the known roles, each
+                // one length. A bare number means pixels; px, rem and em are
+                // kept as typed. An empty field means "not set", so the
+                // stylesheet's own fallback applies; 0 is a real value.
+                return RadiusPalette::sanitizeOwnerMap($value);
+            },
+            'theme_setup'                          => function ($value) {
+                if (!is_array($value)) {
+                    return [];
+                }
+                $data = [];
+
+                foreach ($value as $key => $val) {
+                    $data[sanitize_text_field($key)] = sanitize_hex_color($val);
+                }
+
+                return $data;
+            },
+
+        ];
+
+        return apply_filters('fluent_cart/store_settings/sanitizer', $sanitizer);
+    }
+}

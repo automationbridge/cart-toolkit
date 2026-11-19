@@ -1,0 +1,896 @@
+<?php
+
+namespace FluentCart\Api\Resource\FrontendResource;
+
+use FluentCart\Api\Cookie\Cookie;
+use FluentCart\Api\Resource\BaseResourceApi;
+use FluentCart\App\App;
+use FluentCart\App\Helpers\AddressHelper;
+use FluentCart\App\Helpers\CartHelper;
+use FluentCart\App\Helpers\Helper;
+use FluentCart\App\Models\Cart;
+use FluentCart\App\Models\Customer;
+use FluentCart\App\Models\ProductVariation;
+use FluentCart\App\Services\RateLimiter;
+use FluentCart\Framework\Database\Orm\Builder;
+use FluentCart\Framework\Support\Arr;
+use FluentCart\Framework\Support\Collection;
+use WP_Error;
+
+class CartResource extends BaseResourceApi
+{
+
+    /**
+     * Per-request memo for get(). In production every HTTP request runs in a
+     * fresh PHP process, so this lives exactly one request. Long-running
+     * processes that simulate multiple requests (test suites, CLI) must clear
+     * it between simulated requests via resetCartCache() — as a
+     * function-static it was unreachable and leaked the first request's cart
+     * into every subsequent one.
+     *
+     * Only a resolved Cart is memoized; a null ("no cart") result is
+     * deliberately re-queried on the next call — matching the original
+     * function-static behavior, where isset(null) === false.
+     *
+     * @var Cart|null|false false = not resolved yet
+     */
+    private static $cartCache = false;
+
+    public static function resetCartCache(): void
+    {
+        static::$cartCache = false;
+    }
+
+    public static function getQuery(): Builder
+    {
+        return Cart::query();
+    }
+
+    public static function generateCartForInstantCheckout($variationId, $quantity = 1, $params = [])
+    {
+        RateLimiter::isSpamming('generate_instant_checkout_cart_attempt', 10, 60, true);
+
+        $isCustom = Arr::get($params, 'is_custom', false);
+
+        if($isCustom) {
+            $variation = Arr::get($params, 'variation');
+            $variation = CartHelper::normalizeCustomFields($variation);
+        }
+        else {
+            // product_detail must be eager-loaded — generateCartItemFromVariation
+            // reads $variation['product_detail']['variation_type'] to stamp
+            // the cart item's variation_type. Without it the field is null on
+            // instant-checkout carts and CartRenderer can't tell whether to
+            // hide the variant-title line for simple products.
+            $variation = ProductVariation::query()
+                ->with(['product', 'product_detail', 'media', 'shippingClass'])
+                ->where('id', $variationId)->first();
+
+            $variation = apply_filters('fluent_cart/cart/item_modify', $variation, [
+                'item_id'     => $variationId,
+                'quantity'    => $quantity,
+            ]);
+        }
+        
+        if (!$variation) {
+            return new WP_Error(__('Invalid Product', 'fluent-cart'));
+        }
+
+        $quantity = apply_filters('fluent_cart/item_max_quantity', $quantity, [
+            'variation' => $variation,
+            'product'   => !$isCustom ? $variation->product : []
+        ]);
+
+        // After the filter, not before: this path takes its quantity straight from a
+        // public URL param, and the filter above can replace it with anything.
+        $error = CartHelper::validateQuantity($quantity);
+        if ($error) {
+            return $error;
+        }
+        $quantity = (int)$quantity;
+
+        if ($variation->payment_type === 'subscription') {
+            $quantity = 1;
+        }
+
+        if(!$isCustom) {
+            $canPurchase = $variation->canPurchase($quantity);
+            if (is_wp_error($canPurchase)) {
+                return $canPurchase;
+            }
+        }
+
+        $cartQuery = Cart::query()
+            ->whereJsonLength('cart_data', 1)
+            ->whereRaw("JSON_UNQUOTE(JSON_EXTRACT(cart_data, '$[0].id')) = ?", [(string)$variationId])
+            ->whereRaw("JSON_UNQUOTE(JSON_EXTRACT(cart_data, '$[0].quantity')) = ?", [(string)$quantity])
+            ->where('cart_group', 'instant')
+            ->where('stage', '==', 'draft');
+        
+        if (is_user_logged_in()) {
+            $cartQuery->where('user_id', get_current_user_id());
+        } else {
+            $cartQuery->whereNull('user_id');
+        }
+
+        $cart = $cartQuery->first();
+
+        if (!$cart) {
+            if(!$isCustom) {
+                $cart = CartHelper::generateCartFromVariation($variation, $quantity);
+            }
+            else {
+                // Legacy object-to-array conversion. Kept for backward compatibility.
+                $cart = CartHelper::generateCartFromCustomVariation(json_decode(json_encode($variation), true), $quantity);
+            }
+        } else {
+            // Refresh cart_data from the current variation on every instant hit.
+            // The inputs (variationId + quantity) are deterministic URL params,
+            // so regenerating is idempotent — and it picks up any fields that
+            // were missing on a previously-created draft (variation_type for
+            // advanced-variation rows, refreshed pricing, updated featured
+            // media). Without this, a stale draft from before a code change
+            // keeps rendering with its old shape.
+            if (!$isCustom) {
+                $cart->cart_data = [
+                    CartHelper::generateCartItemFromVariation($variation, $quantity)
+                ];
+            } else {
+                $cart->cart_data = [
+                    CartHelper::generateCartItemCustomItem(json_decode(json_encode($variation), true), $quantity)
+                ];
+            }
+        }
+
+        if (is_user_logged_in()) {
+            $cart->user_id = get_current_user_id();
+        }
+
+        $cart->cart_group = 'instant';
+
+        $cart->cart_hash = md5(time() . wp_generate_uuid4());
+
+        $cart->save();
+        return $cart;
+
+    }
+
+    /**
+     * Retrieve cart based on the provided parameters.
+     *
+     * This function looks for a cart associated with the provided cart hash. If no cart is found,
+     * it creates a new cart for anonymous users. If the user is logged in, it associates the cart
+     * with the logged-in user.
+     *
+     * @param array $params Optional. Additional parameters for cart retrieval.
+     *        [
+     *            // Include optional parameters, if any.
+     *        ]
+     *
+     */
+    public static function get(array $params = [])
+    {
+        if (static::$cartCache !== false && static::$cartCache !== null) {
+            return static::$cartCache;
+        }
+
+        $autoCreate = Arr::get($params, 'create', false);
+
+        $cartHash = Arr::get($params, 'hash');
+
+        //$cartHash = App::request()->get('fct_cart_hash');
+
+        if ($cartHash) {
+            /**
+             * Which cart groups a client-supplied hash is allowed to resolve.
+             *
+             * Deliberately a whitelist rather than an open lookup: a group named
+             * here becomes reachable by anyone holding the hash, which is the
+             * right trade for a checkout a shopper was handed a link to, and the
+             * wrong one for the device's own `global` basket. An add-on that
+             * mints its own checkout carts adds its group here so every later
+             * request — apply_coupon, save_checkout_data, place_order — resolves
+             * the same row.
+             *
+             * @param array $groups cart_group values resolvable by hash.
+             */
+            $hashGroups = apply_filters('fluent_cart/cart/hash_resolvable_cart_groups', ['instant']);
+            $hashGroups = array_values(array_filter(array_map('strval', (array)$hashGroups)));
+
+            if (!$hashGroups) {
+                // A listener returning nothing must not widen the lookup to
+                // every group; fall back to the shipped behaviour.
+                $hashGroups = ['instant'];
+            }
+
+            $cartQuery = static::getQuery()
+                ->where('cart_hash', $cartHash)
+                ->where('stage', '!=', 'completed')
+                ->whereIn('cart_group', $hashGroups);
+
+            $tempCart = $cartQuery->first();
+            if ($tempCart) {
+                $tempCart->refreshStaleDynamicFees();
+            }
+
+            static::$cartCache = $tempCart;
+
+            if (!$autoCreate) {
+                return $tempCart;
+            }
+        }
+
+        static::$cartCache = static::getOrSetCartForThisDevice($autoCreate);
+        if (static::$cartCache) {
+            static::$cartCache->refreshStaleDynamicFees();
+        }
+
+        return static::$cartCache;
+    }
+
+    public static function find($id, $params = [])
+    {
+
+    }
+
+    /**
+     * Create cart with the provided item data.
+     *
+     * @param array $data Required. Array containing the necessary parameters
+     *        [
+     *            'id' => (int) Required.The ID of the item,
+     *            'quantity' => (int) Optional.The quantity of the item
+     *        ]
+     * @param array $params Optional. Additional parameters for cart creation or update.
+     *        [
+     *            // Include optional parameters, if any.
+     *        ]
+     *
+     */
+    public static function create($data, $params = [])
+    {
+        $itemId = Arr::get($data, 'id');
+        $quantity = Arr::get($data, 'quantity', 1);
+
+        // This path writes cart_data directly instead of going through Cart::addItem().
+        $error = CartHelper::validateQuantity($quantity);
+        if ($error) {
+            return static::makeErrorResponse([
+                ['code' => 403, 'message' => $error->get_error_message()]
+            ]);
+        }
+
+        $cart = CartResource::get([
+            'create' => true
+        ]);
+        $cartArray = $cart->cart_data;
+
+        $cartArray = self::updateCartItemsQuantity(
+            [
+                'item_id'        => $itemId,
+                'increment_by'   => $quantity,
+                'existing_items' => $cartArray
+            ]
+        );
+
+        if (Arr::get($cartArray, 'code', '') === 'failed') {
+            return static::makeErrorResponse([
+                ['code' => 423, 'message' => Arr::get($cartArray, 'message', __('Cart validation error!', 'fluent-cart'))]
+            ]);
+        }
+
+        $cart->cart_data = Arr::get($cartArray, 'cart_data');
+        $message = Arr::get($cartArray, 'message');
+
+        $isCreated = $cart->save();
+
+        if ($isCreated) {
+            return static::makeSuccessResponse(
+                $isCreated,
+                __('Successfully added!', 'fluent-cart')
+            );
+        }
+
+        return static::makeErrorResponse([
+            ['code' => 400, 'message' => __('Could not add', 'fluent-cart')]
+        ]);
+    }
+
+    /**
+     * Update the quantity of an item in the cart.
+     *
+     * @param array $data Required. Array containing the necessary parameters for item quantity
+     *        [
+     *            'item_id' => (int) Required.The ID of the product_variation,
+     *            'quantity'=> (int) Optional.The quantity of the item
+     *        ]
+     * @param int $id Required. The ID of the cart.
+     * @param array $params Optional. Additional parameters for updating cart
+     *        [
+     *            // Include optional parameters, if any.
+     *        ]
+     *
+     */
+    public static function update($data, $id = '', $params = [])
+    {
+        // Resolve only; a rejected item must not leave an empty cart row behind.
+        $cart = self::get([
+            'create' => false,
+            'hash'   => Arr::get($params, 'hash'),
+        ]);
+
+        $itemId = (int)Arr::get($data, 'item_id');
+        $quantity = Arr::get($data, 'quantity', 0);
+        $byInput = (bool)Arr::get($data, 'by_input', false);
+
+        if (!$itemId) {
+            return new WP_Error(
+                'invalid_item',
+                __('Invalid item.', 'fluent-cart')
+            );
+        }
+
+        $existingItem = $cart ? Arr::get($cart->findExistingItemAndIndex($itemId), 1) : null;
+
+        $rawIsCustom = $existingItem !== null
+            ? Arr::get($existingItem, 'is_custom', false)
+            : Arr::get($data, 'is_custom', false);
+
+        $isCustom = in_array(
+            strtolower((string) $rawIsCustom),
+            ['1', 'true'],
+            true
+        );
+
+        if($isCustom){
+            // Detect item and quantity change, let external modify item
+            if ($existingItem) {
+                $changedVariation = apply_filters('fluent_cart/cart/custom_item_quantity_changed', $existingItem, 
+                [
+                    'old_quantity'     => (int) Arr::get($existingItem, 'quantity', 0),
+                    'new_quantity'     => $quantity,
+                    'by_input'         => $byInput,
+                    'is_changed'       => true,
+                    'is_custom'        => $isCustom,
+                ]); 
+
+                if (!is_object($changedVariation)) {
+                    $changedVariation = (object) $changedVariation;
+                }
+
+                $variation = $changedVariation;
+
+                $quantity = isset($changedVariation->quantity)
+                    ? (int) $changedVariation->quantity
+                    : 0;
+            }
+            else {
+                $variation = apply_filters('fluent_cart/cart/validate_custom_item', $existingItem, [
+                    'item_id'          => $itemId,
+                    'quantity'         => $quantity,
+                    'is_custom'        => $isCustom,
+                ]);
+
+                // Cast arrays only: (object) null is a truthy empty object that slips past the guard below.
+                if (is_array($variation)) {
+                    $variation = (object) $variation;
+                }
+            }
+
+            if (!$variation || !is_object($variation)) {
+                return new WP_Error('invalid_custom_item', 
+                    __('Invalid custom item data.', 'fluent-cart'));
+            }
+
+        }else{
+            $variation = ProductVariation::query()->where('id', $itemId)->with('product')->first();
+            $variation = apply_filters('fluent_cart/cart/item_modify', $variation, [
+                'item_id'        => $itemId,
+                'quantity'       => $quantity,
+            ]);
+        }
+
+        if (!$variation) {
+            // An item already in the cart whose variation row has since
+            // disappeared (product/variation deleted) is dropped gracefully.
+            // An id that was never in the cart and resolves to nothing is a
+            // client error — silently answering "Cart updated successfully"
+            // hid typos and probing as a 200 no-op.
+            if ($existingItem !== null) {
+                return $cart->removeItem($itemId);
+            }
+
+            return new WP_Error(
+                'invalid_item',
+                __('Invalid item.', 'fluent-cart')
+            );
+        }
+
+        $soldIndividually = $isCustom
+            ? !empty($variation->sold_individually)  
+            : (bool) $variation->soldIndividually();
+
+        if ($soldIndividually) {
+            if ($quantity >= 1) {
+                $quantity = 1;
+            }
+            $byInput = true;
+        }
+
+        if (!$cart) {
+            $cart = self::get([
+                'create' => true,
+                'hash'   => Arr::get($params, 'hash'),
+            ]);
+        }
+
+        if($isCustom) {
+            $cart = $cart->addByCustom(
+                is_array($variation) ? $variation : (array) $variation,
+                [
+                    'quantity'  => $quantity,
+                    'is_custom' => $isCustom,
+                ]
+            );
+
+        }
+        else {
+            $cart = $cart->addByVariation($variation, [
+                'quantity'      => $quantity,
+                'by_input'      => $byInput,
+                'will_validate' => true,
+                'replace'       => false,
+                'is_custom'     => $isCustom,
+            ]);
+        }
+        
+
+        if (is_wp_error($cart)) {
+            return $cart;
+        }
+
+        $utmData = static::prepareUtmData($data);
+        if ($utmData) {
+            // Replaced, not merged. A cart row is reused across visits, so merging
+            // key by key accumulated a union of every touch that ever reached it and
+            // the column stopped describing any single one. The browser has already
+            // resolved which touch this is, so its block is the answer.
+            $cart->utm_data = $utmData;
+            $cart->save();
+        }
+
+        return $cart;
+    }
+
+    public static function prepareUtmData(array $params): array
+    {
+        $data = [];
+        $allowedUtmParams = [
+            'utm_campaign',
+            'utm_content',
+            'utm_term',
+            'utm_source',
+            'utm_medium',
+            'utm_id',
+            'refer_url',
+            'fbclid',
+            'gclid'
+        ];
+
+        foreach ($allowedUtmParams as $utmParam) {
+            if (isset($params[$utmParam])) {
+                $data[$utmParam] = $params[$utmParam];
+            }
+        }
+        return $data;
+    }
+
+    /**
+     * Delete cart based on the provided user ID or cart hash.
+     *
+     * @param int $id Required. The user ID associated with the cart.
+     * @param array $params Optional. Additional parameters for cart deletion.
+     *        [
+     *           'cart_hash' => (string) Optional. The cart hash for additional identification.
+     *        ]
+     *
+     */
+    public static function delete($id, $params = [])
+    {
+        $cart = static::get();
+
+        if (empty($cart)) {
+            return null;
+        }
+
+        $deleted = $cart->delete();
+
+        if ($deleted) {
+            Cookie::deleteCartHash();
+        }
+
+        return $deleted;
+    }
+
+    public static function getStatus(): array
+    {
+        $cart = static::get(
+            [
+                'create' => false // Do not create a new cart if it doesn't exist
+            ]
+        );
+
+        if (!$cart) {
+            return [];
+        }
+
+        return [
+            'cart_hash' => $cart->cart_hash,
+            'cart_data' => $cart->cart_data,
+            'cart_user' => $cart->user_id,
+        ];
+    }
+
+    public static function isLicensedProduct($productVariation): bool
+    {
+        return Helper::hasLicense(Arr::get($productVariation, 'product'));
+    }
+
+
+    private static function validateShouldAddProduct($productVariation, $existingItemsArray)
+    {
+        if (Arr::get($productVariation, 'product.post_status') !== 'publish') {
+            return new WP_Error(
+                'item_not_available',
+                __('Item is not available.', 'fluent-cart')
+            );
+        }
+
+        $variationIds = (new Collection($existingItemsArray))->pluck('object_id');
+        $paymentType = Arr::get($productVariation, 'other_info.payment_type', false);
+
+        $hasInstantCheckoutParam = !empty(App::request()->get(Helper::INSTANT_CHECKOUT_URL_PARAM));
+
+        //early return as don't allow subscription item to add in cart
+        if ($paymentType !== 'onetime' && !$hasInstantCheckoutParam) {
+            return new WP_Error(
+                'item_not_available',
+                __('Item is not available.', 'fluent-cart')
+            );
+        }
+        $hasSubscription = static::hasSubscriptionProduct($existingItemsArray);
+
+        if (!$variationIds->contains(Arr::get($productVariation, 'id')) || empty($existingItemsArray)) {
+            return new WP_Error(
+                'item_not_available',
+                __('Item is not available.', 'fluent-cart')
+            );
+
+        }
+
+        if ($paymentType === 'onetime' && !$hasSubscription) {
+            return true;
+        }
+
+        if ($paymentType === 'onetime' && $hasSubscription) {
+            return new WP_Error(
+                'subscription_items_can_not_combined',
+                __('Subscription items can\'t be combined with other products in the cart.', 'fluent-cart')
+            );
+        }
+
+        return new WP_Error(
+            'item_not_available',
+            __('Item is not available.', 'fluent-cart')
+        );
+    }
+
+    public static function hasSubscriptionProduct($existingItemsArray = []): bool
+    {
+        $subscriptionProduct = (new Collection($existingItemsArray))->pluck('other_info')->filter(function ($info) {
+            $otherInfo = (array)$info;
+            $type = Arr::get($otherInfo, 'payment_type', false);
+            return $type === 'subscription';
+        });
+        return $subscriptionProduct->count() > 0;
+    }
+
+    private static function removeItemFromCart($existingItemsArray, $index): array
+    {
+        unset($existingItemsArray[$index]);
+        $message = __('Item removed from cart', 'fluent-cart');
+        return [
+            'message'   => $message,
+            'cart_data' => $existingItemsArray,
+        ];
+    }
+
+    public static function updateItemQuantityInCart($productVariation, $existingItemsArray, $index, $quantity = 1, $isFilteredItem = false): array
+    {
+        $canBeAdded = true;
+
+
+        if (!$isFilteredItem) {
+            $canBeAdded = static::validateShouldAddProduct($productVariation, $existingItemsArray);
+        }
+
+
+        if (is_wp_error($canBeAdded)) {
+            return [
+                'code'    => 'failed',
+                'message' => $canBeAdded->get_error_message()
+            ];
+        }
+
+        $updatedQuantity = $existingItemsArray[$index]['quantity'] + $quantity;
+
+        if ($updatedQuantity < 0) {
+            $updatedQuantity = 0;
+        }
+
+        if ($updatedQuantity > 0 && ($error = CartHelper::validateQuantity($updatedQuantity))) {
+            return [
+                'code'    => 'failed',
+                'message' => $error->get_error_message()
+            ];
+        }
+
+        if (!$isFilteredItem) {
+
+            if (!CartHelper::shouldAddItemToCart($productVariation, $updatedQuantity)) {
+                return [
+                    'code'    => 'failed',
+                    'message' => __("You've reached the maximum quantity for this product.", 'fluent-cart')
+                ];
+            }
+        }
+
+        if ($productVariation instanceof ProductVariation) {
+            $item = CartHelper::generateCartItemFromVariation($productVariation, $updatedQuantity);
+        } else {
+            $item = CartHelper::generateCartItemCustomItem($productVariation, $updatedQuantity);
+        }
+
+
+        $existingItemsArray[$index] = $item;
+        return [
+            'message'   => __('Quantity updated!', 'fluent-cart'),
+            'cart_data' => $existingItemsArray,
+        ];
+    }
+
+    public static function addItemInCart($productVariation, $existingItemsArray, $index, $quantity = 1, $isFilteredItem = false): array
+    {
+
+        if ($quantity < 1) {
+            $quantity = 1;
+        }
+
+        if ($error = CartHelper::validateQuantity($quantity)) {
+            return [
+                'code'    => 'failed',
+                'message' => $error->get_error_message()
+            ];
+        }
+
+        if (!$isFilteredItem) {
+            if (!CartHelper::shouldAddItemToCart($productVariation, $quantity)) {
+                return [
+                    'code'    => 'failed',
+                    'message' => sprintf(
+                    /* translators: %s is the product title */
+                        __('%s is out of stock', 'fluent-cart'),
+                        Arr::get($productVariation, 'variation_title')
+                    ),
+                ];
+            }
+
+            $paymentType = $productVariation instanceof ProductVariation
+                ? $productVariation->payment_type
+                : Arr::get($productVariation, 'payment_type');
+
+            if ($paymentType === 'subscription' && $quantity > 1) {
+                return [
+                    'code'    => 'failed',
+                    'message' => __('You cannot purchase more than one subscription at a time.', 'fluent-cart'),
+                ];
+            }
+
+            if (!empty($existingItemsArray)) {
+                $hasSubscription = static::hasSubscriptionProduct($existingItemsArray);
+
+                if ($paymentType === 'subscription' || $hasSubscription) {
+                    return [
+                        'code'    => 'failed',
+                        'message' => __("Subscription items can't be combined with other products in the cart.", 'fluent-cart'),
+                    ];
+                }
+            }
+        }
+
+        if ($productVariation instanceof ProductVariation) {
+            $item = CartHelper::generateCartItemFromVariation($productVariation, $quantity);
+        } else {
+            $item = CartHelper::generateCartItemCustomItem($productVariation, $quantity);
+        }
+
+
+        $existingItemsArray[] = static::getCartSingleItemPreparedArray(
+            [
+                'variation' => $productVariation,
+                'quantity'  => $quantity
+            ]
+        );
+
+
+        return [
+            'message'   => __('Item added in cart!', 'fluent-cart'),
+            'cart_data' => $existingItemsArray,
+        ];
+    }
+
+    private static function updateCartItemsQuantity($params = []): array
+    {
+        $itemId = Arr::get($params, 'item_id');
+
+        $incrementBy = Arr::get($params, 'increment_by');
+        $existingItemsArray = Arr::get($params, 'existing_items', []);
+        if (!is_array($existingItemsArray)) {
+            $existingItemsArray = [];
+        }
+
+
+        $index = -1;
+
+        foreach ($existingItemsArray as $itemIndex => $existingItem) {
+            if (Arr::get($existingItem, 'object_id') == $itemId) {
+                $index = $itemIndex;
+                break;
+            }
+        }
+
+
+        /** @var $productVariation ProductVariation */
+        if ($incrementBy == 0) {
+            return static::removeItemFromCart($existingItemsArray, $index);
+        }
+
+        $productVariation = ProductVariation::query()->where('id', $itemId)->with([
+            'product',
+            'product.detail',
+            'product.licensesMeta',
+            'product_detail',
+            'media',
+            'shippingClass'
+        ])->first();
+
+
+        $isFilteredItem = false;
+        if (empty($productVariation)) {
+            $isFilteredItem = true;
+            $productVariation = apply_filters('fluent_cart/cart_item_product_variation', $productVariation, $itemId, $incrementBy, $existingItemsArray);
+        }
+
+
+        if (empty($productVariation)) {
+            return [
+                'code'    => 'failed',
+                'message' => __('Item is not available.', 'fluent-cart')
+            ];
+        }
+
+        //($index === 0 || !empty($index)) && isset($existingItemsArray[$index])
+        //inline check will not work
+
+        $isValidIndex = false;
+        if ($index != -1) {
+            $isValidIndex = true;
+        }
+
+        if ($isValidIndex && isset($existingItemsArray[$index])) {
+
+            return static::updateItemQuantityInCart(
+                $productVariation,
+                $existingItemsArray,
+                $index,
+                $incrementBy,
+                $isFilteredItem,
+            );
+        }
+
+        return static::addItemInCart(
+            $productVariation,
+            $existingItemsArray,
+            $index,
+            $incrementBy,
+            $isFilteredItem,
+        );
+    }
+
+
+    private static function getCartSingleItemPreparedArray($params = []): array
+    {
+
+        $variation = Arr::get($params, 'variation');
+        $quantity = Arr::get($params, 'quantity');
+        return CartHelper::generateCartItemFromVariation($variation, $quantity);
+
+    }
+
+    /**
+     * Check if cart exists
+     */
+
+    public static function getOrSetCartForThisDevice($autoCreate = false)
+    {
+
+        $cartHash = Cookie::getCartHash();
+
+        if ($cartHash) {
+            $cart = static::getQuery()
+                ->where('stage', '!=', 'completed')
+                ->where('cart_hash', $cartHash)
+                ->where('cart_group', 'global')
+                ->first();
+
+            if ($cart) {
+                return $cart;
+            }
+        }
+
+        $userId = get_current_user_id();
+        if ($userId) {
+            // Latest cart first — without an order, first() picks by primary key
+            // (cart_hash), which resurrects an arbitrary old cart for the user.
+            $cart = static::getQuery()
+                ->where('user_id', $userId)
+                ->where('stage', '!=', 'completed')
+                ->where('cart_group', 'global')
+                ->orderBy('updated_at', 'DESC')
+                ->first();
+
+            if ($cart) {
+                return $cart;
+            }
+        }
+
+        if (!$autoCreate) {
+            return null;
+        }
+
+        $cart = new Cart();
+        $cart->cart_data = [];
+
+        $cart = CartHelper::addCommonCartData($cart);
+
+        $cart->save();
+
+        Cookie::setCartHash($cart->cart_hash);
+
+        return $cart;
+    }
+
+    /**
+     * This method should be called only if no cart is found in a current device
+     */
+    private static function setupNewCart()
+    {
+        $cartArray['cart_data'] = [];
+        if ($userId = get_current_user_id()) {
+            $cartArray['user_id'] = $userId;
+        }
+        $cartArray['cart_group'] = 'global';
+        return Cart::query()->create($cartArray);
+
+    }
+
+    public static function resetCartData()
+    {
+        $cart = CartResource::get();
+
+        if (is_array($cart->cart_data) && !empty($cart->cart_data)) {
+            $cart->cart_data = [];
+            $cart->save();
+        }
+    }
+}

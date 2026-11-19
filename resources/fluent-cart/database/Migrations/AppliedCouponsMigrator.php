@@ -1,0 +1,35 @@
+<?php
+
+namespace FluentCart\Database\Migrations;
+
+
+use FluentCart\Framework\Database\Schema;
+
+class AppliedCouponsMigrator extends Migrator
+{
+
+	public static string $tableName = 'fct_applied_coupons';
+
+	public static function getSqlSchema(): string
+	{
+        $indexPrefix = 'fct_acoup_';
+		return "`id` BIGINT UNSIGNED NOT NULL PRIMARY KEY AUTO_INCREMENT,
+            `order_id` BIGINT UNSIGNED NOT NULL,
+            `coupon_id` BIGINT UNSIGNED NULL,
+			`code` VARCHAR(100) NOT NULL ,
+			`amount` double NOT NULL,
+			`created_at` DATETIME NULL ,
+			`updated_at` DATETIME NULL,
+        	INDEX `{$indexPrefix}_code_idx` (`code`),
+        	INDEX `{$indexPrefix}_coupon_order_idx` (`coupon_id`, `order_id`)";
+	}
+
+	public static function migrated()
+	{
+		// Per-customer usage counting filters by coupon_id and joins orders
+		// through order_id (CanValidateCoupon::hasMaxPerUserLimit,
+		// DiscountService::isCouponValid) — without this, every validation
+		// scans the table as usage history grows.
+		static::addIndexIfNotExists('fct_acoup__coupon_order_idx', ['coupon_id', 'order_id']);
+	}
+}

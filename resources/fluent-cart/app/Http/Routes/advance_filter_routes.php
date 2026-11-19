@@ -1,0 +1,27 @@
+<?php if ( ! defined( 'ABSPATH' ) ) exit; ?>
+<?php
+
+/**
+ * @var $router Router
+ */
+
+use FluentCart\App\Http\Controllers\AdvanceFilter\AdvanceFilterController;
+use FluentCart\App\Http\Controllers\VariantController;
+use FluentCart\Framework\Http\Router;
+
+/*
+ * No `permissions` meta here, unlike every other admin route. One URL serves
+ * many unrelated data sets, so the permission depends on the requested
+ * remote_data_key — AdvanceFilterController::resolvePermission() resolves it
+ * per key, and AdvanceFilterPolicy keeps non-admins from reaching the
+ * controller in the first place.
+ */
+$router->prefix('advance_filter')
+    ->withPolicy('AdvanceFilterPolicy')
+    ->group(function (Router $router) {
+        $router->get('/get-filter-options', [AdvanceFilterController::class, 'getFilterOption']);
+    });
+
+$router->get('forms/search_options', [AdvanceFilterController::class, 'getSearchOptions'])->withPolicy('AdminPolicy')->meta([
+    'permissions' => 'super_admin'
+]);

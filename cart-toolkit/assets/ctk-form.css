@@ -1,0 +1,110 @@
+/**
+ * Cart Toolkit form. Colours come from FluentCart's checkout variables where it
+ * defines them, with neutral fallbacks, so the picker follows the store's theme.
+ */
+
+.ctk-form {
+	--ctk-line: var(--fct-checkout-border-color, rgba(0, 0, 0, 0.14));
+	--ctk-accent: var(--fct-checkout-primary-color, currentColor);
+	--ctk-muted: var(--fct-checkout-secondary-text-color, rgba(0, 0, 0, 0.6));
+	--ctk-error: #b42318;
+}
+
+.ctk-picker {
+	border: 0;
+	margin: 0 0 24px;
+	padding: 0;
+	min-width: 0;
+}
+
+.ctk-picker-legend {
+	font-weight: 600;
+	margin-bottom: 10px;
+	padding: 0;
+}
+
+.ctk-picker-options {
+	display: grid;
+	gap: 10px;
+}
+
+.ctk-option {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	padding: 14px 16px;
+	border: 1.5px solid var(--ctk-line);
+	border-radius: 10px;
+	cursor: pointer;
+	min-height: 52px;
+}
+
+.ctk-option:has(input:checked) {
+	border-color: var(--ctk-accent);
+	box-shadow: inset 0 0 0 1px var(--ctk-accent);
+}
+
+.ctk-option input {
+	margin: 0;
+	flex: none;
+	accent-color: var(--ctk-accent);
+}
+
+.ctk-option-title {
+	flex: 1;
+	min-width: 0;
+	font-weight: 600;
+}
+
+.ctk-option-price {
+	color: var(--ctk-muted);
+	white-space: nowrap;
+}
+
+.ctk-picker.is-busy {
+	opacity: 0.6;
+	pointer-events: none;
+}
+
+.ctk-picker-error {
+	color: var(--ctk-error);
+	margin: 8px 0 0;
+	height: 1.5em;
+	overflow: hidden;
+}
+
+.ctk-choices {
+	border: 0;
+	margin: 0;
+	padding: 0;
+	min-width: 0;
+}
+
+.ctk-choice {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	margin: 6px 0;
+	cursor: pointer;
+}
+
+.ctk-req {
+	color: var(--ctk-error);
+}
+
+.ctk-form-note {
+	padding: 14px 16px;
+	border: 1px dashed rgba(0, 0, 0, 0.2);
+	border-radius: 8px;
+}
+
+@media (max-width: 480px) {
+	.ctk-option {
+		flex-wrap: wrap;
+	}
+
+	.ctk-option-price {
+		width: 100%;
+		padding-left: 28px;
+	}
+}

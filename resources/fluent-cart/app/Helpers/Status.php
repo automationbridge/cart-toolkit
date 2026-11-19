@@ -1,0 +1,576 @@
+<?php
+
+namespace FluentCart\App\Helpers;
+
+use FluentCart\Framework\Support\Arr;
+
+class Status
+{
+    // product statuses: publish, draft, pending, private, future
+    public const PRODUCT_PUBLISH = 'publish';
+    public const PRODUCT_DRAFT = 'draft';
+    public const PRODUCT_PRIVATE = 'private';
+    public const PRODUCT_FUTURE = 'future';
+    public const PRODUCT_TRASH = 'trash';
+
+    // Order Statuses
+    public const ORDER_PROCESSING = 'processing';
+    public const ORDER_COMPLETED = 'completed';
+    public const ORDER_ON_HOLD = 'on-hold';
+    public const ORDER_CANCELED = 'canceled';
+    public const ORDER_FAILED = 'failed';
+
+    public const ORDER_MODE_TEST = 'test';
+    public const ORDER_MODE_LIVE = 'live';
+
+    // Payment Statuses
+    public const PAYMENT_PENDING = 'pending';
+    public const PAYMENT_PAID = 'paid';
+    public const PAYMENT_PARTIALLY_PAID = 'partially_paid';
+    public const PAYMENT_FAILED = 'failed';
+    public const PAYMENT_REFUNDED = 'refunded';
+    public const PAYMENT_PARTIALLY_REFUNDED = 'partially_refunded';
+    public const PAYMENT_AUTHORIZED = 'authorized';
+    public const PAYMENT_SCHEDULED = 'payment_scheduled';
+
+    // Transaction Statuses
+    // Product review statuses — fct_product_reviews.status values
+    public const REVIEW_APPROVED = 'approved';
+    public const REVIEW_PENDING = 'pending';
+    public const REVIEW_SPAM = 'spam';
+    public const REVIEW_TRASH = 'trash';
+
+    // Review permission modes — who may submit a review
+    public const REVIEW_PERMISSION_VERIFIED_BUYERS = 'verified_buyers';
+    public const REVIEW_PERMISSION_LOGGED_IN = 'logged_in';
+    public const REVIEW_PERMISSION_ANYONE = 'anyone';
+
+    public const TRANSACTION_SUCCEEDED = 'succeeded';
+    public const TRANSACTION_AUTHORIZED = 'authorized';
+    public const TRANSACTION_PENDING = 'pending';
+    public const TRANSACTION_REFUNDED = 'refunded';
+    public const TRANSACTION_FAILED = 'failed';
+    public const TRANSACTION_DISPUTE_LOST = 'dispute_lost';
+
+
+    // Transaction table transaction_type status
+    public const TRANSACTION_TYPE_CHARGE = 'charge';
+    public const TRANSACTION_TYPE_REFUND = 'refund';
+    public const TRANSACTION_TYPE_DISPUTE = 'dispute';
+
+    // todo: will remove after some necessary test
+    public const TRANSACTION_TYPE_SIGNUP = 'signup_fee';
+
+    // Subscription Statuses
+    public const SUBSCRIPTION_PENDING = 'pending';
+    public const SUBSCRIPTION_INTENDED = 'intended';
+    public const SUBSCRIPTION_TRIALING = 'trialing';
+    public const SUBSCRIPTION_ACTIVE = 'active';
+
+    public const SUBSCRIPTION_CANCELED = 'canceled';
+    public const SUBSCRIPTION_PAUSED = 'paused';
+    public const SUBSCRIPTION_PAST_DUE = 'past_due';
+    public const SUBSCRIPTION_EXPIRED = 'expired';
+    public const SUBSCRIPTION_FAILING = 'failing';
+    public const SUBSCRIPTION_EXPIRING = 'expiring';
+    public const SUBSCRIPTION_COMPLETED = 'completed';
+    public const SUBSCRIPTION_AUTHENTICATED = 'authenticated';
+    public const SUBSCRIPTION_CREATED = 'created';
+
+    public const SUBSCRIPTION_METHOD_MANUAL = 'manual';
+    public const SUBSCRIPTION_METHOD_AUTOMATIC = 'automatic';
+    public const SUBSCRIPTION_METHOD_SYSTEM = 'system';
+
+    // billing interval
+    public const BILLING_YEARLY = 'yearly';
+    public const BILLING_HALF_YEARLY = 'half_yearly';
+    public const BILLING_QUARTERLY = 'quarterly';
+    public const BILLING_MONTHLY = 'monthly';
+    public const BILLING_WEEKLY = 'weekly';
+    public const BILLING_DAILY = 'daily';
+
+    // Shipping Statuses
+    public const SHIPPING_UNSHIPPED = 'unshipped';
+    public const SHIPPING_SHIPPED = 'shipped';
+    public const SHIPPING_PARTIALLY_SHIPPED = 'partially_shipped';
+    public const SHIPPING_DELIVERED = 'delivered';
+    public const SHIPPING_UNSHIPPABLE = 'unshippable';
+
+    // Customer Statuses
+    public const CUSTOMER_ACTIVE = 'active';
+    public const CUSTOMER_INACTIVE = 'inactive';
+
+    // Stock Statuses
+    public const STOCK_INSTOCK = 'instock';
+    public const STOCK_OUTOFSTOCK = 'outofstock';
+    public const STOCK_ONBACKORDER = 'onbackorder';
+
+
+    public const SCHEDULE_PENDING = 'pending';
+    public const SCHEDULE_COMPLETED = 'completed';
+    public const SCHEDULE_FAILED = 'failed';
+
+    public const SCHEDULE_PROCESSING = 'processing';
+
+    public const LICENSE_ACTIVE = 'active';
+    public const LICENSE_DISABLED = 'disabled';
+    public const LICENSE_EXPIRED = 'expired';
+
+    public const FULFILLMENT_TYPE_PHYSICAL = 'physical';
+    public const FULFILLMENT_TYPE_DIGITAL = 'digital';
+
+    public const ORDER_TYPE_PAYMENT = 'payment';
+    public const ORDER_TYPE_SUBSCRIPTION = 'subscription';
+    public const ORDER_TYPE_RENEWAL = 'renewal';
+
+
+    public static function getProductStatuses($withLabel = true)
+    {
+        return apply_filters('fluent_cart/product_statuses', [
+            self::PRODUCT_PUBLISH => __('Publish', 'fluent-cart'),
+            self::PRODUCT_DRAFT   => __('Draft', 'fluent-cart'),
+            self::PRODUCT_PRIVATE => __('Private', 'fluent-cart'),
+            self::PRODUCT_FUTURE  => __('Scheduled', 'fluent-cart'),
+            self::PRODUCT_TRASH   => __('Trashed', 'fluent-cart'),
+        ], []);
+    }
+
+    public static function getScheduleStatus($status): string
+    {
+        $statuses = [
+            'pending'    => Status::SCHEDULE_PENDING,
+            'processing' => Status::SCHEDULE_PROCESSING,
+            'completed'  => Status::SCHEDULE_COMPLETED,
+            'failed'     => Status::SCHEDULE_FAILED,
+        ];
+
+        return $statuses[$status] ?? Status::SCHEDULE_PENDING;
+    }
+
+    public static function getLicenseStatus($status): string
+    {
+        $statuses = [
+            'active'   => Status::LICENSE_ACTIVE,
+            'disabled' => Status::LICENSE_DISABLED,
+            'expired'  => Status::LICENSE_EXPIRED,
+        ];
+
+        return $statuses[$status] ?? Status::LICENSE_ACTIVE;
+    }
+
+    public static function productAdminAllStatuses()
+    {
+        $statuses = self::getProductStatuses();
+        unset($statuses[self::PRODUCT_TRASH]);
+        return array_keys($statuses);
+    }
+
+
+    // Order statuses
+    public static function getOrderStatuses()
+    {
+        return apply_filters('fluent_cart/order_statuses', [
+            self::ORDER_PROCESSING => __('Processing', 'fluent-cart'),
+            self::ORDER_COMPLETED  => _x('Completed', 'Order status', 'fluent-cart'),
+            self::ORDER_ON_HOLD    => __('On Hold', 'fluent-cart'),
+            self::ORDER_CANCELED   => _x('Canceled', 'Order status', 'fluent-cart'),
+            self::ORDER_FAILED     => _x('Failed', 'Order status', 'fluent-cart'),
+        ], []);
+    }
+
+    /**
+     * Translated label for an order status key, or the key itself when unknown.
+     */
+    public static function getOrderStatusLabel($status): string
+    {
+        return (string)Arr::get(self::getOrderStatuses(), (string)$status, $status);
+    }
+
+    public static function getEditableOrderStatuses()
+    {
+        $statuses = [
+            self::ORDER_ON_HOLD    => __('On Hold', 'fluent-cart'),
+            self::ORDER_PROCESSING => __('Processing', 'fluent-cart'),
+            self::ORDER_COMPLETED  => _x('Completed', 'Order status', 'fluent-cart'),
+            //  'archived' => __('Archived', 'fluent-cart'),
+            self::ORDER_CANCELED   => _x('Canceled', 'Order status', 'fluent-cart')
+        ];
+
+        return apply_filters('fluent_cart/editable_order_statuses', $statuses, []);
+    }
+
+
+    // Payment statuses
+    public static function getPaymentStatuses()
+    {
+        return apply_filters('fluent_cart/payment_statuses', [
+            self::PAYMENT_PENDING            => _x('Pending', 'Payment status', 'fluent-cart'),
+            self::PAYMENT_PAID               => _x('Paid', 'Payment status', 'fluent-cart'),
+            self::PAYMENT_PARTIALLY_PAID     => __('Partially Paid', 'fluent-cart'),
+            self::PAYMENT_FAILED             => _x('Failed', 'Payment status', 'fluent-cart'),
+            self::PAYMENT_REFUNDED           => _x('Refunded', 'Payment status', 'fluent-cart'),
+            self::PAYMENT_PARTIALLY_REFUNDED => __('Partially Refunded', 'fluent-cart'),
+            self::PAYMENT_AUTHORIZED         => _x('Authorized', 'Payment status', 'fluent-cart'),
+            self::PAYMENT_SCHEDULED          => __('Payment Scheduled', 'fluent-cart'),
+        ], []);
+    }
+
+    // Transaction statuses
+    public static function getTransactionStatuses($withLabel = true)
+    {
+        return apply_filters('fluent_cart/transaction_statuses', [
+            self::TRANSACTION_PENDING   => _x('Pending', 'Transaction status', 'fluent-cart'),
+            self::TRANSACTION_SUCCEEDED => _x('Succeeded', 'Transaction status', 'fluent-cart'),
+            self::TRANSACTION_AUTHORIZED => _x('Authorized', 'Transaction status', 'fluent-cart'),
+            self::TRANSACTION_FAILED    => _x('Failed', 'Transaction status', 'fluent-cart'),
+            self::TRANSACTION_REFUNDED  => _x('Refunded', 'Transaction status', 'fluent-cart'),
+        ], []);
+
+        if ($withLabel) {
+            return $statuses;
+        }
+
+        return array_keys($statuses);
+    }
+
+    public static function getEditableTransactionStatuses($withLabel = true)
+    {
+        $statuses = [
+            self::TRANSACTION_PENDING   => _x('Pending', 'Transaction status', 'fluent-cart'),
+            self::TRANSACTION_SUCCEEDED => _x('Succeeded', 'Transaction status', 'fluent-cart'),
+            self::TRANSACTION_AUTHORIZED => _x('Authorized', 'Transaction status', 'fluent-cart'),
+            self::TRANSACTION_FAILED    => _x('Failed', 'Transaction status', 'fluent-cart'),
+            self::TRANSACTION_REFUNDED  => _x('Refunded', 'Transaction status', 'fluent-cart'),
+        ];
+
+        $statuses = apply_filters('fluent_cart/editable_transaction_statuses', $statuses, []);
+
+        if ($withLabel) {
+            return $statuses;
+        }
+
+        return array_keys($statuses);
+    }
+
+    // Shipping statuses
+    public static function getShippingStatuses()
+    {
+        return apply_filters('fluent_cart/shipping_statuses', [
+            self::SHIPPING_UNSHIPPED          => __('Unshipped', 'fluent-cart'),
+            self::SHIPPING_SHIPPED            => __('Shipped', 'fluent-cart'),
+            self::SHIPPING_PARTIALLY_SHIPPED  => __('Partially Shipped', 'fluent-cart'),
+            self::SHIPPING_DELIVERED          => _x('Delivered', 'Shipping status', 'fluent-cart'),
+            self::SHIPPING_UNSHIPPABLE        => __('Unshippable', 'fluent-cart'),
+        ], []);
+    }
+
+    public static function getEditableShippingStatuses()
+    {
+        $statuses = [
+            self::SHIPPING_UNSHIPPED   => __('Unshipped', 'fluent-cart'),
+            self::SHIPPING_SHIPPED     => __('Shipped', 'fluent-cart'),
+            self::SHIPPING_DELIVERED   => _x('Delivered', 'Shipping status', 'fluent-cart'),
+            self::SHIPPING_UNSHIPPABLE => __('Unshippable', 'fluent-cart'),
+        ];
+
+        return apply_filters('fluent_cart/editable_shipping_statuses', $statuses, []);
+    }
+
+    // Subscription statuses
+    public static function getSubscriptionStatuses()
+    {
+        return apply_filters('fluent_cart/subscription_statuses', [
+            self::SUBSCRIPTION_PENDING  => _x('Pending', 'Subscription status', 'fluent-cart'),
+            self::SUBSCRIPTION_ACTIVE   => _x('Active', 'Subscription status', 'fluent-cart'),
+            self::SUBSCRIPTION_FAILING  => __('Failing', 'fluent-cart'),
+            self::SUBSCRIPTION_PAUSED   => __('Paused', 'fluent-cart'),
+            self::SUBSCRIPTION_EXPIRED  => _x('Expired', 'Subscription status', 'fluent-cart'),
+            self::SUBSCRIPTION_EXPIRING => __('Expiring', 'fluent-cart'),
+            self::SUBSCRIPTION_CANCELED => _x('Canceled', 'Subscription status', 'fluent-cart'),
+            self::SUBSCRIPTION_TRIALING => __('Trialing', 'fluent-cart'),
+            self::SUBSCRIPTION_INTENDED => __('Intended', 'fluent-cart'),
+            self::SUBSCRIPTION_PAST_DUE => __('Past Due', 'fluent-cart'),
+            self::SUBSCRIPTION_COMPLETED   => _x('Completed', 'Subscription status', 'fluent-cart'),
+        ], []);
+    }
+
+    // Get Validable Subscription Statuses
+    public static function getValidableSubscriptionStatuses()
+    {
+        return apply_filters('fluent_cart/validable_subscription_statuses', [
+            self::SUBSCRIPTION_ACTIVE,
+            self::SUBSCRIPTION_TRIALING,
+        ], []);
+    }
+
+
+    // Stock statuses
+    public static function getStockStatuses($withLabel = true)
+    {
+        $statues = [
+            self::STOCK_INSTOCK    => __('In Stock', 'fluent-cart'),
+            self::STOCK_OUTOFSTOCK => __('Out Of Stock', 'fluent-cart'),
+        ];
+
+        if ($withLabel) {
+            return $statues;
+        }
+
+        return array_keys($statues);
+    }
+
+    public static function getOrderSuccessStatuses()
+    {
+        return [
+            self::ORDER_COMPLETED,
+            self::ORDER_PROCESSING,
+        ];
+    }
+
+    public static function getOrderFailedStatuses()
+    {
+        return [
+            self::ORDER_FAILED,
+            //'refunded',
+            self::ORDER_CANCELED,
+        ];
+    }
+
+    public static function getOrderPaymentSuccessStatuses()
+    {
+        return [
+            self::PAYMENT_PAID,
+            self::PAYMENT_PARTIALLY_REFUNDED,
+            self::PAYMENT_PARTIALLY_PAID,
+        ];
+    }
+
+    public static function getPaymentRetryableStatuses()
+    {
+        return [
+            self::PAYMENT_PENDING,
+            self::PAYMENT_FAILED
+        ];
+    }
+
+    public static function getReportStatuses()
+    {
+        return [
+            self::PAYMENT_PAID,
+            self::PAYMENT_REFUNDED,
+            self::PAYMENT_PARTIALLY_PAID,
+            self::PAYMENT_PARTIALLY_REFUNDED,
+        ];
+    }
+
+    public static function getTransactionSuccessStatuses()
+    {
+        return apply_filters('fluent_cart/transaction_success_statuses', [self::TRANSACTION_SUCCEEDED, self::TRANSACTION_AUTHORIZED], []);
+    }
+
+    /**
+     * All product review statuses (fct_product_reviews.status values).
+     */
+    public static function getReviewStatuses(): array
+    {
+        return [
+            self::REVIEW_APPROVED,
+            self::REVIEW_PENDING,
+            self::REVIEW_SPAM,
+            self::REVIEW_TRASH,
+        ];
+    }
+
+    /**
+     * Review statuses that count as an existing review for duplicate
+     * detection. Spam and trash are deliberately excluded — a review the
+     * store rejected does not block the customer from submitting a fresh
+     * one. Every surface that projects "can this user review?" must use
+     * this set so it never contradicts the
+     * ProductReviewService::canSubmitReview() write-path guard.
+     */
+    public static function getReviewDuplicateStatuses(): array
+    {
+        return apply_filters('fluent_cart/review_duplicate_statuses', [
+            self::REVIEW_APPROVED,
+            self::REVIEW_PENDING,
+        ]);
+    }
+
+    /**
+     * Review statuses the author may see in their own history: everything
+     * except spam and trash.
+     *
+     * Derived by exclusion, not by listing, so a status added later is
+     * visible to its author by default — only the two that mean "this is not
+     * really a review" are held back, and a customer who has been silently
+     * spammed or trashed is not shown that judgement.
+     *
+     * Deliberately NOT getReviewDuplicateStatuses(). The two sets happen to
+     * hold the same values today, but they answer different questions, and
+     * that one is filterable: a site narrowing its duplicate rules would
+     * otherwise hide customers' pending reviews from them as a side effect.
+     *
+     * @return array
+     */
+    public static function getReviewAuthorVisibleStatuses(): array
+    {
+        return array_values(array_diff(
+            static::getReviewStatuses(),
+            [self::REVIEW_SPAM, self::REVIEW_TRASH]
+        ));
+    }
+
+    // Get all statuses (optional utility)
+    public static function all()
+    {
+        return [
+            'product'      => self::getProductStatuses(),
+            'order'        => self::getOrderStatuses(),
+            'payment'      => self::getPaymentStatuses(),
+            'transaction'  => self::getTransactionStatuses(),
+            'shipping'     => self::getShippingStatuses(),
+            'customer'     => self::getEditableCustomerStatuses(),
+            'subscription' => self::getSubscriptionStatuses(),
+        ];
+    }
+
+    public static function getEditableCustomerStatuses()
+    {
+        $statuses = [
+            self::CUSTOMER_ACTIVE   => _x('Active', 'Customer status', 'fluent-cart'),
+            self::CUSTOMER_INACTIVE => _x('Inactive', 'Customer status', 'fluent-cart'),
+        ];
+
+        return apply_filters('fluent_cart/editable_customer_statuses', $statuses, []);
+    }
+
+    // call when syncing status from external services, ex: 
+    public static function syncPaymentStatus($status)
+    {
+        $status = strtolower($status);
+        $statuses = self::getPaymentStatuses();
+
+        if (isset($statuses[$status])) {
+            return $status;
+        }
+
+        if ('completed' === $status) {
+            return self::PAYMENT_PAID;
+        }
+
+        if ('succeeded' === $status) {
+            return self::PAYMENT_PAID;
+        }
+
+        return $status;
+    }
+
+    public static function syncTransactionStatus($status)
+    {
+        $status = strtolower($status);
+        $statuses = self::getTransactionStatuses();
+
+        if (isset($statuses[$status])) {
+            return $status;
+        }
+
+        if ('paid' === $status) {
+            return self::TRANSACTION_SUCCEEDED;
+        } else if ('succeeded' === $status) {
+            return self::TRANSACTION_SUCCEEDED;
+        }
+
+        return $status;
+    }
+
+    public static function syncSubscriptionStatus($status)
+    {
+        if ('cancelled' === $status || 'canceled' === $status) {
+            return self::SUBSCRIPTION_CANCELED;
+        }
+
+        return $status;
+    }
+
+    public static function eventTriggers(): array
+    {
+        return [
+            'require_list'   => false,
+            'required'       => true,
+            'key'            => 'event_trigger',
+            'options'        => [
+                'order'        => [
+                    'label'   => __('Orders', 'fluent-cart'),
+                    'options' => [
+                        [
+                            'value' => 'order_paid_done',
+                            'label' => __('Order Paid (Payment / Subscription)', 'fluent-cart')
+                        ],
+                        [
+                            'value' => 'order_status_changed_to_canceled',
+                            'label' => __('Order Canceled', 'fluent-cart')
+                        ],
+                        [
+                            'value' => 'order_fully_refunded',
+                            'label' => __('Order Refunded (Full)', 'fluent-cart')
+                        ]
+                    ]
+                ],
+                'subscription' => [
+                    'label'   => __('Subscriptions', 'fluent-cart'),
+                    'options' => [
+                        [
+                            'value' => 'subscription_activated',
+                            'label' => __('Subscription Activated', 'fluent-cart')
+                        ],
+                        [
+                            'value' => 'subscription_reactivated',
+                            'label' => __('Subscription Reactivated', 'fluent-cart')
+                        ],
+                        [
+                            'value' => 'subscription_canceled',
+                            'label' => __('Subscription Canceled', 'fluent-cart')
+                        ],
+                        [
+                            'value' => 'subscription_renewed',
+                            'label' => __('Subscription Renewed', 'fluent-cart')
+                        ],
+                        [
+                            'value' => 'subscription_eot',
+                            'label' => __('Subscription End of Term (Completed)', 'fluent-cart')
+                        ],
+                        [
+                            'value' => 'subscription_expired_validity',
+                            'label' => __('Subscription Expired / End of Access Validity', 'fluent-cart')
+                        ]
+                    ]
+                ],
+                'product'      => [
+                    'label'   => __('Shipping', 'fluent-cart'),
+                    'options' => [
+                        [
+                            'value' => 'shipping_status_changed_to_shipped',
+                            'label' => __('Order Shipped', 'fluent-cart')
+                        ],
+                        [
+                            'value' => 'shipping_status_changed_to_delivered',
+                            'label' => __('Order Delivered', 'fluent-cart')
+                        ],
+                        [
+                            'value' => 'order_shipment_created',
+                            'label' => __('Shipment Created (with tracking)', 'fluent-cart')
+                        ]
+                    ]
+                ]
+            ],
+            'inline_tip'     => __('Select in which event you want to trigger this feed', 'fluent-cart'),
+            'label'          => __('Event Trigger', 'fluent-cart'),
+            'placeholder'    => __('Select Event', 'fluent-cart'),
+            'component'      => 'selection_group',
+            'checkbox_label' => __('Event Trigger For This Feed', 'fluent-cart'),
+        ];
+    }
+
+    // Additional statuses can be added here as needed
+}

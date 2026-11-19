@@ -1,0 +1,198 @@
+<?php
+
+namespace FluentCart\App\Models;
+
+use FluentCart\App\Modules\MultiCurrency\Services\StorefrontPrice;
+use FluentCart\App\Helpers\Helper;
+use FluentCart\App\Models\Concerns\CanSearch;
+use FluentCart\App\Models\Concerns\CanUpdateBatch;
+use FluentCart\Framework\Database\Orm\Relations\BelongsTo;
+use FluentCart\Framework\Database\Orm\Relations\HasMany;
+use FluentCart\Framework\Database\Orm\Relations\HasOne;
+use FluentCart\App\Models\WpModels\PostMeta;
+use FluentCart\Framework\Support\Arr;
+
+/**
+ *  Product Details Model - DB Model for Product Details
+ *
+ *  Database Model
+ *
+ *
+ * @package FluentCart\App\Models
+ *
+ * @version 1.0.0
+ */
+class ProductDetail extends Model
+{
+
+    use CanSearch, CanUpdateBatch;
+
+    protected $table = 'fct_product_details';
+
+    protected $guarded = [
+        'id',
+    ];
+
+    protected $fillable = [
+        'post_id',
+        'fulfillment_type',
+        'min_price',
+        'max_price',
+        'default_variation_id',
+        'variation_type',
+        'stock_availability',
+        'other_info',
+        'default_media',
+        'manage_stock',
+        'manage_downloadable'
+    ];
+
+    /**
+     * The attributes that should be cast.
+     *
+     * @var array
+     */
+    protected $casts = [
+        'post_id'   => 'integer',
+        'min_price' => 'double',
+        'max_price' => 'double',
+    ];
+
+    protected $appends = ['featured_media', 'formatted_min_price', 'formatted_max_price'];
+
+    public function setOtherInfoAttribute($value)
+    {
+        if (is_array($value) || is_object($value)) {
+            $this->attributes['other_info'] = json_encode($value);
+        } else {
+            $this->attributes['other_info'] = $value;
+        }
+    }
+
+    public function getOtherInfoAttribute($value)
+    {
+        return !empty($value) ? json_decode($value, true) : null;
+    }
+
+
+    protected function getFormattedMinPriceAttribute()
+    {
+        return StorefrontPrice::format($this->min_price);
+    }
+
+    protected function getFormattedMaxPriceAttribute()
+    {
+        return StorefrontPrice::format($this->max_price);
+    }
+
+
+    /**
+     * Products whose own reviews switch is off; a missing key counts as on.
+     * Raw because the connection turns the double quotes of JSON selectors
+     * (other_info->reviews_enabled) into backticks. Table-qualified so it holds
+     * inside correlated subqueries on this table.
+     */
+    public function scopeReviewsDisabled($query)
+    {
+        $otherInfo = $query->getQuery()->getGrammar()->wrap($this->getTable() . '.other_info');
+
+        return $query->whereRaw("JSON_UNQUOTE(JSON_EXTRACT({$otherInfo}, '$.reviews_enabled')) = 'no'");
+    }
+
+    /**
+     * One2One: Product Details belongs to one Product
+     *
+     * @return BelongsTo
+     */
+    public function product(): BelongsTo
+    {
+        return $this->belongsTo(Product::class, 'post_id', 'ID');
+    }
+
+    /**
+     * One2One: Product Details belongs to one Gallery Image
+     * @return HasOne
+     */
+    public function galleryImage(): HasOne
+    {
+        return $this->hasOne(PostMeta::class, 'post_id', 'post_id')
+            ->where('postmeta.meta_key', 'fluent-products-gallery-image');
+    }
+
+    // First element of Gallery Image which is considered as featured image
+    public function getFeaturedMediaAttribute()
+    {
+        $meta = $this->galleryImage;
+
+        if ($meta && is_array($meta->meta_value) && !empty($meta->meta_value)) {
+            return Arr::first($meta->meta_value); // Return the first element
+        }
+
+        return null;
+    }
+
+    public function variants(): HasMany
+    {
+        return $this->hasMany(ProductVariation::class, 'post_id', 'post_id')->orderBy('serial_index', 'asc');
+    }
+
+    public function setDefaultMediaAttribute($value)
+    {
+        if (is_array($value) || is_object($value)) {
+            $this->attributes['default_media'] = json_encode($value);
+        } else {
+            $this->attributes['default_media'] = $value;
+        }
+    }
+
+    public function getDefaultMediaAttribute($value)
+    {
+        return !empty($value) ? json_decode($value, true) : null;
+    }
+
+    public function hasPriceVariation()
+    {
+        return $this->variation_type === 'simple' && $this->max_price !== $this->min_price;
+    }
+
+    public function getStockAvailability($variationId = null)
+    {
+       
+        if (!$this->manage_stock) {
+            $availability = [
+                'manage_stock'       => false,
+                'availability'       => __('In Stock', 'fluent-cart'),
+                'class'              => 'in-stock',
+                'available_quantity' => null
+            ];
+        } else if ($this->stock_availability === 'in-stock') {
+            $availability = [
+                'manage_stock'       => true,
+                'availability'       => __('In Stock', 'fluent-cart'),
+                'class'              => 'in-stock',
+                'available_quantity' => $this->stock_availability
+            ];
+        } else {
+            $availability = [
+                'manage_stock'       => true,
+                'availability'       => __('Out of Stock', 'fluent-cart'),
+                'class'              => 'out-of-stock',
+                'available_quantity' => $this->stock_availability
+            ];
+        }
+
+        return apply_filters('fluent_cart/product_stock_availability', $availability, [
+            'detail'       => $this,
+            'variation_id' => $variationId
+        ]);
+    }
+    public function getMinPriceAttribute()
+    {
+        return $this->variants()->min('item_price');
+    }
+
+    public function getMaxPriceAttribute()
+    {
+        return $this->variants()->max('item_price');
+    }
+}

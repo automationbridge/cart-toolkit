@@ -1,0 +1,290 @@
+<?php
+
+namespace FluentCart\App\Services\FileSystem\Drivers\S3;
+
+use Exception;
+use FluentCart\App\Modules\StorageDrivers\S3\S3;
+use WP_Error;
+
+class S3FileUploader
+{
+    /**
+     * Value of the If-None-Match header. "*" means "only if no object exists
+     * under this key", which S3 answers with 412 when the key is taken.
+     */
+    private const IF_NONE_MATCH = '*';
+
+    private string $accessKey;
+    private string $secretKey;
+    private string $bucket;
+    private string $region;
+    private string $hashAlgorithm = 'sha256';
+    private string $httpMethod;
+    private string $localFilePath;
+    private string $s3FilePath;
+    private string $signature;
+    private string $requestUrl;
+    private string $timeStamp;
+    private string $date;
+    private bool $preventOverwrite;
+
+    /**
+     * @throws Exception
+     */
+    public function __construct(string $secret, string $accessKey, string $bucket, string $region, string $localFilePath, string $s3FilePath)
+    {
+        $this->accessKey = $accessKey;
+        $this->secretKey = $secret;
+        $this->bucket = $bucket;
+        $this->region = S3::getBucketRegion($bucket);
+        $this->localFilePath = $localFilePath;
+        $this->s3FilePath = $s3FilePath;
+        $this->httpMethod = "PUT";
+
+        $this->timeStamp = gmdate('Ymd\THis\Z');
+        $this->date = substr($this->timeStamp, 0, 8);
+
+        // ✅ Correct Regional Endpoint
+        // $this->requestUrl = "https://{$this->bucket}.s3.{$this->region}.amazonaws.com/{$this->s3FilePath}";
+
+        $hasDot = strpos($this->bucket, '.') !== false;
+        $encodedFilePath = $this->encodeS3ObjectKey($this->s3FilePath);
+
+        if ($hasDot) {
+            // Path-style URL
+            $this->requestUrl = "https://s3.{$this->region}.amazonaws.com/{$this->bucket}/{$encodedFilePath}"; // phpcs:ignore PluginCheck.CodeAnalysis.Offloading.OffloadedContent -- S3 API endpoint for the configured bucket, called server-side
+        } else {
+            // Virtual-hosted style
+            $this->requestUrl = "https://{$this->bucket}.s3.{$this->region}.amazonaws.com/{$encodedFilePath}"; // phpcs:ignore PluginCheck.CodeAnalysis.Offloading.OffloadedContent -- S3 API endpoint for the configured bucket, called server-side
+        }
+
+        // Opt-in: when enabled the upload is refused instead of replacing an
+        // existing object. Resolved before signing because the header is part
+        // of the canonical request.
+        $this->preventOverwrite = (bool)apply_filters('fluent_cart/storage/s3_prevent_overwrite', false, [
+            'bucket'       => $this->bucket,
+            's3_file_path' => $this->s3FilePath,
+        ]);
+
+        $this->signature = $this->generateSignature();
+    }
+
+    /**
+     * @throws Exception
+     */
+    public static function upload(string $secret, string $accessKey, string $bucket, string $region, string $localFilePath, string $s3FilePath)
+    {
+        return (new static($secret, $accessKey, $bucket, $region, $localFilePath, $s3FilePath))->uploadFile();
+    }
+
+    /**
+     * @throws Exception
+     */
+    public function uploadFile()
+    {
+        add_filter('http_request_timeout', fn() => 30);
+
+        $args = [
+            'method'  => 'PUT',
+            'headers' => $this->getHeaders(),
+            'body'    => file_get_contents($this->localFilePath),
+        ];
+
+        $response = wp_remote_request($this->requestUrl, $args);
+        $responseCode = wp_remote_retrieve_response_code($response);
+
+        if ($responseCode === 200) {
+            return [
+                'message' => __('File Uploaded Successfully', 'fluent-cart'),
+                'driver'  => 's3',
+                'path'    => $this->s3FilePath
+            ];
+        }
+
+        // S3 refused because the key is already taken. Gated on the opt-in so
+        // a 412 raised for any other precondition is not misreported as an
+        // overwrite conflict.
+        if ($responseCode === 412 && $this->preventOverwrite) {
+            return new WP_Error(
+                $responseCode,
+                sprintf(
+                    /* translators: %s is the file name that already exists in the bucket */
+                    __('A file named "%s" already exists in this bucket and existing files cannot be replaced. Upload it under a new name, for example by increasing the version number.', 'fluent-cart'),
+                    basename($this->s3FilePath)
+                )
+            );
+        }
+
+        return new WP_Error($responseCode, __('Failed To Upload File', 'fluent-cart'));
+    }
+
+    public function getSignature(): string
+    {
+        return $this->signature;
+    }
+
+    /**
+     * @throws Exception
+     */
+    public function generateSignature()
+    {
+        return hash_hmac(
+            $this->hashAlgorithm,
+            $this->createStringToSign(),
+            $this->getSigningKey()
+        );
+    }
+
+    private function createScope(): string
+    {
+        return "{$this->date}/{$this->region}/s3/aws4_request";
+    }
+
+    /**
+     * @throws Exception
+     */
+    private function getContentHash(): string
+    {
+        if (!file_exists($this->localFilePath)) {
+            throw new \Exception(esc_html__('File not found', 'fluent-cart'));
+        }
+        return hash($this->hashAlgorithm, file_get_contents($this->localFilePath));
+    }
+
+    /**
+     * Percent-encodes each "/"-separated segment of an S3 object key using
+     * AWS's UriEncode rules (rawurlencode leaves "/" alone). This keeps the
+     * canonical signing path and the actual request URL identical to what
+     * S3 receives on the wire, so multi-byte UTF-8 characters, spaces, and
+     * reserved characters ("+", "#", "?", literal "%") all round-trip to
+     * the exact key that was requested instead of a different object.
+     *
+     * Deliberately does not ltrim() leading slashes: "foo", "/foo", and
+     * "//foo" are three distinct S3 keys, and stripping the slash made a
+     * delete/upload targeting "/foo" silently operate on "foo" instead.
+     */
+    private function encodeS3ObjectKey(string $path): string
+    {
+        return implode('/', array_map('rawurlencode', explode('/', $path)));
+    }
+
+    /**
+     * @throws Exception
+     */
+    private function createCanonicalUrl(): string
+    {
+        // Ensure file path begins with /
+        $s3FilePath = '/' . $this->encodeS3ObjectKey($this->s3FilePath);
+
+        $contentHash = $this->getContentHash();
+
+        // If bucket has dot, use path-style URL in canonical request
+        if (strpos($this->bucket, '.') !== false) {
+            $canonicalUri = "/{$this->bucket}{$s3FilePath}";
+        } else {
+            $canonicalUri = $s3FilePath;
+        }
+
+        $canonicalHeaders = '';
+        foreach ($this->getCanonicalHeaders($contentHash) as $name => $value) {
+            $canonicalHeaders .= "{$name}:{$value}\n";
+        }
+
+        return "{$this->httpMethod}\n"
+            . "{$canonicalUri}\n\n"
+            . $canonicalHeaders
+            . "\n"
+            . "{$this->getSignedHeaders()}\n"
+            . "{$contentHash}";
+    }
+
+    /**
+     * Headers covered by the signature, keyed by lowercase name and sorted as
+     * SigV4 requires. Single source for both the canonical request and the
+     * SignedHeaders list in the Authorization header — if the two ever
+     * disagree, S3 rejects every upload with 403.
+     *
+     * @return array<string, string>
+     */
+    private function getCanonicalHeaders(string $contentHash): array
+    {
+        $headers = [
+            'host'                 => $this->getUploadHost(),
+            'x-amz-content-sha256' => $contentHash,
+            'x-amz-date'           => $this->timeStamp,
+        ];
+
+        if ($this->preventOverwrite) {
+            $headers['if-none-match'] = self::IF_NONE_MATCH;
+        }
+
+        ksort($headers);
+
+        return $headers;
+    }
+
+    /**
+     * The semicolon-separated SignedHeaders value. Built from the same names
+     * as the canonical request, without re-reading the file to hash it.
+     */
+    private function getSignedHeaders(): string
+    {
+        return implode(';', array_keys($this->getCanonicalHeaders('')));
+    }
+
+    private function getUploadHostOld(): string
+    {
+        // ✅ Regional host
+        return "{$this->bucket}.s3.{$this->region}.amazonaws.com"; // phpcs:ignore PluginCheck.CodeAnalysis.Offloading.OffloadedContent -- S3 API endpoint for the configured bucket, called server-side
+    }
+
+    private function getUploadHost(): string
+    {
+        if ($this->bucket === '') {
+            return "s3.{$this->region}.amazonaws.com"; // phpcs:ignore PluginCheck.CodeAnalysis.Offloading.OffloadedContent -- S3 API endpoint for the configured bucket, called server-side
+        }
+
+        // If bucket contains dot, use path-style host
+        if (strpos($this->bucket, '.') !== false) {
+            return "s3.{$this->region}.amazonaws.com"; // phpcs:ignore PluginCheck.CodeAnalysis.Offloading.OffloadedContent -- S3 API endpoint for the configured bucket, called server-side
+        }
+
+        return "{$this->bucket}.s3.{$this->region}.amazonaws.com"; // phpcs:ignore PluginCheck.CodeAnalysis.Offloading.OffloadedContent -- S3 API endpoint for the configured bucket, called server-side
+    }
+
+    /**
+     * @throws Exception
+     */
+    private function createStringToSign(): string
+    {
+        $hash = hash($this->hashAlgorithm, $this->createCanonicalUrl());
+        return "AWS4-HMAC-SHA256\n{$this->timeStamp}\n{$this->createScope()}\n{$hash}";
+    }
+
+    private function getSigningKey()
+    {
+        $dateKey = hash_hmac($this->hashAlgorithm, $this->date, "AWS4{$this->secretKey}", true);
+        $regionKey = hash_hmac($this->hashAlgorithm, $this->region, $dateKey, true);
+        $serviceKey = hash_hmac($this->hashAlgorithm, 's3', $regionKey, true);
+
+        return hash_hmac($this->hashAlgorithm, 'aws4_request', $serviceKey, true);
+    }
+
+    /**
+     * @throws Exception
+     */
+    public function getHeaders(): array
+    {
+        $headers = [
+            'x-amz-content-sha256' => $this->getContentHash(),
+            'x-amz-date'           => $this->timeStamp,
+            'Authorization'        => "AWS4-HMAC-SHA256 Credential={$this->accessKey}/{$this->date}/{$this->region}/s3/aws4_request, SignedHeaders={$this->getSignedHeaders()}, Signature={$this->getSignature()}"
+        ];
+
+        if ($this->preventOverwrite) {
+            $headers['If-None-Match'] = self::IF_NONE_MATCH;
+        }
+
+        return $headers;
+    }
+}

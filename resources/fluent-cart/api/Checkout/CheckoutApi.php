@@ -1,0 +1,1463 @@
+<?php
+
+namespace FluentCart\Api\Checkout;
+
+use FluentCart\App\Modules\MultiCurrency\Services\CartCurrency;
+use FluentCart\Api\Resource\CustomerResource as ApiCustomerResource;
+use FluentCart\Api\Resource\FrontendResource\CustomerAddressResource;
+use FluentCart\Api\Resource\FrontendResource\CustomerResource;
+use FluentCart\Api\StoreSettings;
+use FluentCart\App\App;
+use FluentCart\App\Events\Order\OrderCreated;
+use FluentCart\App\Events\StockChanged;
+use FluentCart\App\Helpers\AddressHelper;
+use FluentCart\App\Helpers\CartCheckoutHelper;
+use FluentCart\App\Helpers\CartHelper;
+use FluentCart\App\Helpers\Helper;
+use FluentCart\App\Helpers\CheckoutProcessor;
+use FluentCart\App\Helpers\Status;
+use FluentCart\App\Helpers\UtmHelper;
+use FluentCart\App\Models\Cart;
+use FluentCart\App\Models\Customer;
+use FluentCart\App\Models\CustomerAddresses;
+use FluentCart\App\Models\Order;
+use FluentCart\App\Models\OrderAddress;
+use FluentCart\App\Models\ShippingMethod;
+use FluentCart\App\Services\CheckoutService;
+use FluentCart\App\Services\CustomerIdentity\EmailVerificationService;
+use FluentCart\App\Services\Localization\LocalizationManager;
+use FluentCart\App\Services\OrderService;
+use FluentCart\App\Services\Payments\PaymentHelper;
+use FluentCart\App\Services\Payments\PaymentInstance;
+use FluentCart\App\Services\Renderer\CheckoutFieldsSchema;
+use FluentCart\Framework\Http\Response;
+use FluentCart\App\Services\RateLimiter;
+use FluentCart\Framework\Support\Arr;
+use FluentCart\Framework\Support\Str;
+use FluentCart\Framework\Validator\Validator;
+
+class CheckoutApi
+{
+    /**
+     * @throws \Exception
+     */
+
+    /**
+     * The checkout page was priced at another rate or currency: re-price the
+     * cart and reload, so the total and payment form match what is charged.
+     * The notice explains why once the page has reloaded.
+     */
+    private static function refuseForCurrency(Cart $cart, \WP_Error $error)
+    {
+        CartCurrency::releaseCheckout($cart);
+        $checkoutData = is_array($cart->checkout_data) ? $cart->checkout_data : [];
+        $checkoutData['__checkout_error_notices'] = [$error->get_error_message()];
+        $cart->checkout_data = $checkoutData;
+        $cart->save();
+
+        wp_send_json([
+            'status'  => 'failed',
+            'message' => $error->get_error_message(),
+            'reload'  => true,
+        ], 423);
+    }
+
+    public static function placeOrder(array $data, $fromCheckout = false)
+    {
+
+        RateLimiter::isSpamming('place_order_attempt', 5, 60, true);
+
+        $userTz = Arr::get($data, 'user_tz', 'UTC');
+
+        $cart = CartHelper::getCart();
+
+        if (!$cart || !$cart->cart_data || $cart->stage === 'completed') {
+            wp_send_json([
+                'status'  => 'failed',
+                'message' => __('Cart is empty or already completed', 'fluent-cart'),
+            ]);
+        }
+
+        // Serialize all submissions of one cart BEFORE the prevOrder read: locking later
+        // (or per-order) lets two concurrent first submissions both see prevOrder = null
+        // and create two orders -> two idempotency keys -> double charge.
+        static::acquireCartLock($cart->cart_hash);
+
+        // Price shipping from the quote the customer saw, not a fresh carrier call.
+        AddressHelper::reuseCarrierQuotes();
+
+        // Re-read under the lock (fresh(), not getCart() — that one is request-cached):
+        // a submission we waited on may have completed this cart meanwhile.
+        $cart = $cart->fresh();
+        if (!$cart || !$cart->cart_data || $cart->stage === 'completed') {
+            wp_send_json([
+                'status'  => 'failed',
+                'message' => __('Cart is empty or already completed', 'fluent-cart'),
+            ]);
+        }
+
+        // The currency and rate the page was priced at (dev-docs/multi-currency/
+        // 05-storefront-cart-checkout.md), checked on the cart as submitted: coupon revalidation, tax,
+        // shipping and fee hooks below save the cart, and a save re-prices an
+        // expired lock — which would accept a rate the shopper never saw.
+        // Accepted, the lock is held for the rest of this checkout.
+        $shownCurrency = sanitize_text_field((string) Arr::get($data, 'fct_shown_currency', ''));
+        $shownQuote = sanitize_text_field((string) Arr::get($data, 'fct_shown_quote', ''));
+        $currencySnapshot = CartCurrency::checkoutSnapshot($cart, $shownCurrency, $shownQuote);
+        if (is_wp_error($currencySnapshot)) {
+            static::refuseForCurrency($cart, $currencySnapshot);
+        }
+        CartCurrency::holdForCheckout($cart);
+
+        $cart = $cart->reValidateCoupons();
+
+        // Never charge a price the shopper did not see: re-price and let them review.
+        // Same refusal as a changed rate, so the reloaded page shows the notice.
+        if ($cart->refreshStalePrices()) {
+            static::refuseForCurrency($cart, new \WP_Error(
+                'prices_changed',
+                __('Some prices in your cart have changed. Please review your order and place it again.', 'fluent-cart')
+            ));
+        }
+
+        $cartData = $cart->cart_data;
+
+        // Carts stored before the quantity ceiling existed can still hold an overflowing line.
+        foreach ($cartData as $cartItem) {
+            $quantityError = CartHelper::validateQuantity(Arr::get($cartItem, 'quantity', 1));
+            if ($quantityError) {
+                wp_send_json([
+                    'status'  => 'failed',
+                    'message' => $quantityError->get_error_message(),
+                ], 422);
+            }
+        }
+        $prevOrder = $cart->order;
+        if ($prevOrder) {
+            $prevOrder->load('order_items');
+        }
+        $isLockedCart = $cart->isLocked();
+
+        if ($prevOrder &&
+            (
+                in_array($prevOrder->status, Status::getOrderSuccessStatuses()) ||
+                !in_array($prevOrder->payment_status, Status::getPaymentRetryableStatuses())
+            )
+        ) {
+            if ($isLockedCart) {
+                // Locked carts are bound to a specific order (e.g. pay-for-order links),
+                // so a finalized order really means there is nothing left to pay.
+                wp_send_json([
+                    'status'  => 'failed',
+                    'message' => __('You have already completed this order.', 'fluent-cart'),
+                ]);
+            }
+
+            // The linked order is already finalized but the cart was never marked
+            // completed (e.g. a stale cart resurrected by the logged-in user lookup).
+            // Detach the dead order so the customer can check out again instead of
+            // being blocked on every future purchase.
+            $cart->order_id = null;
+            $checkoutData = $cart->checkout_data;
+            unset($checkoutData['is_locked']);
+            $cart->checkout_data = $checkoutData;
+            $cart->save();
+            $prevOrder = null;
+            $isLockedCart = false;
+        }
+
+        $data = static::addLoggedUserData($data);
+
+
+        // Validate using filter hook (allows addons/modules to validate)
+        $validation = apply_filters('fluent_cart/checkout/validate_before_process', true, $data);
+
+        if (is_wp_error($validation)) {
+            wp_send_json([
+                'status'  => 'failed',
+                'code'    => $validation->get_error_code(),
+                'message' => $validation->get_error_message(),
+            ], 403);
+        }
+
+        // order_id unlocks another order's addresses in prepareAddressData(), so it
+        // may only come from this cart's own order, never from the request.
+        unset($data['order_id']);
+
+        if (empty($data['billing_address_id'])) {
+            if ($prevOrder instanceof Order) {
+                $oldCustomer = $prevOrder->customer;
+                if ($oldCustomer) {
+                    $fallbackAddress = $oldCustomer->billing_address;
+                    if ($fallbackAddress) {
+                        $data['billing_address_id'] = $fallbackAddress->first()->id;
+                    }
+                }
+            }
+        } else if ($prevOrder) {
+            $data['order_id'] = $prevOrder->id;
+        }
+
+        $data = static::prepareAddressData($data);
+
+        $cartCheckoutService = new CheckoutService($cartData);
+        $validatedData = static::validateData($data, $cart, $cartCheckoutService, $prevOrder);
+
+
+
+
+        if (is_wp_error($validatedData)) {
+            wp_send_json([
+                'status' => 'failed',
+                'errors' => $validatedData->get_error_data(),
+            ]);
+        }
+
+        if (!CheckoutFieldsSchema::isFullNameRequired()) {
+            // First/Last name mode: the form posts those fields; the full name is derived from them.
+            $validatedData['billing_full_name'] = trim(
+                Arr::get($validatedData, 'billing_first_name') . ' ' . Arr::get($validatedData, 'billing_last_name')
+            );
+        }
+
+        $orderData = OrderService::groupSanitizedData($validatedData);
+
+        // The form posts the method twice: the checked radio (fc_shipping_method) and its
+        // hidden mirror (fc_selected_shipping_method). validateData() checks only the mirror
+        // against the address's rates, so pricing from the radio let a request pass with one
+        // method and be charged by another, from a zone the address is not in. Read from
+        // $validatedData, not the sanitized copy in others: that is the exact id checked.
+        $shippingMethod = null;
+        $shippingCharge = 0;
+        if (!$cartCheckoutService->isAllDigital()) {
+            $shippingMethod = static::resolveShippingRate($validatedData, $cartData, Arr::get($validatedData, 'fc_selected_shipping_method', ''));
+            if ($shippingMethod) {
+                $shippingCharge = Helper::roundCent(Arr::get($shippingMethod, 'cost', 0));
+            }
+        }
+
+        Arr::set($orderData, 'others.shipping_total', $shippingCharge);
+
+        $cartCheckoutHelper = CartCheckoutHelper::make();
+
+        try {
+            OrderService::validateProducts($cartCheckoutHelper->getItems(), $prevOrder);
+        } catch (\Exception $e) {
+            wp_send_json([
+                'message' => $e->getMessage(),
+            ], 422);
+        }
+
+        $paymentMethod = PaymentHelper::validateAndGetPayMethod($cartCheckoutHelper, $orderData, $shippingCharge);
+
+        Arr::set($orderData, 'others.payment_method', $paymentMethod);
+
+        $orderData['user_tz'] = $userTz;
+
+        $customer = static::getOrCreateCustomer($cartCheckoutHelper, $orderData);
+
+        $shouldCreateUser = static::shouldCreateUser($orderData, Arr::get($orderData, 'billing_address', []));
+
+        // Ensure cart has the current payment method, the order's email and the
+        // submitted checkout fields before recalculating fees. The page saves
+        // each of them separately, and that save can lag or be sent on its own,
+        // so anything that prices this order reads what the order is placed under.
+        static::setPaymentMethod($cart, $paymentMethod);
+        static::setFormFields($cart, $validatedData);
+        $cart->email = $customer->email;
+
+        // The helper's instance prices the order shipping charge below, so it
+        // carries the same method, fields and email from here on.
+        $helperCart = $cartCheckoutHelper->getCart();
+        if ($helperCart && $helperCart !== $cart) {
+            static::setPaymentMethod($helperCart, $paymentMethod);
+            static::setFormFields($helperCart, $validatedData);
+            $helperCart->email = $customer->email;
+        }
+
+        $cart->clearFeeCache();
+        $fees = $cart->getFees();
+
+        // A pricing rule can make this order's postage cheaper. The cart holds the
+        // cheaper figure during the tax recalculation, then gets the real price back.
+        // Shipping tax itself comes from each line's share, which TaxModule discounts
+        // through this same filter. Its own hook keeps fluent_cart/cart/shipping_total,
+        // and the Shipping row it draws, untouched.
+        $preDiscountShippingCharge = (int)$shippingCharge;
+        $shippingCharge = apply_filters('fluent_cart/checkout/order_shipping_charge', $shippingCharge, [
+            'cart' => $cartCheckoutHelper->getCart(),
+        ]);
+        $shippingDiscount = max(0, $preDiscountShippingCharge - (int)$shippingCharge);
+
+        if ($shippingDiscount > 0) {
+            static::setCartShippingCharge($cart, (int)$shippingCharge);
+            $cart->shippingRulesApplied = true;
+        }
+
+        // Recompute cart tax data so fee_tax/fee_tax_lines reflect fees for the current
+        // payment method. The scope prevents ShippingModule from running unnecessarily.
+        do_action('fluent_cart/cart/cart_data_items_updated', ['cart' => $cart, 'scope' => 'payment_method_fee_recalculate']);
+
+        // TaxModule::recalculateTax() refreshes checkout_data['fees'] (RC-adjusted amounts,
+        // deduplication) — reload so persisted fee items match the recomputed fee tax metadata.
+        // Without a tax recalculation the saved list can still hold a filter fee
+        // that no longer applies, so keep only fees getFees() returned.
+        $liveFeeKeys = array_map(function ($fee) {
+            return $fee['source'] . ':' . $fee['key'];
+        }, $fees);
+        $fees = array_values(array_filter((array) Arr::get($cart->checkout_data, 'fees', $fees), function ($fee) use ($liveFeeKeys) {
+            return in_array(sanitize_key(Arr::get($fee, 'source') ?: 'custom') . ':' . sanitize_key((string) Arr::get($fee, 'key')), $liveFeeKeys, true);
+        }));
+
+        $taxBehavior = apply_filters('fluent_cart/cart/tax_behavior', 0, ['cart' => $cart]);
+        $taxTotal = (int)Arr::get($cart->checkout_data, 'tax_data.tax_total', 0);
+        $shippingTax = (int)Arr::get($cart->checkout_data, 'tax_data.shipping_tax', 0);
+        $storeTaxBehavior = (int)Arr::get($cart->checkout_data, 'tax_data.store_tax_behavior', $taxBehavior);
+        $exclusiveTaxTotal = (int)Arr::get($cart->checkout_data, 'tax_data.exclusive_tax_total', 0);
+        $feeTax = (int)Arr::get($cart->checkout_data, 'tax_data.fee_tax', 0);
+        $feeTaxLines = (array)Arr::get($cart->checkout_data, 'tax_data.fee_tax_lines', []);
+
+        // Tax is done, so the cart gets its real postage price back. The rule runs
+        // fresh on every place-order, and a customer returning after a failed payment
+        // must never be discounted from an already discounted charge. Saved here
+        // because nothing after this writes the cart.
+        if ($shippingDiscount > 0) {
+            static::setCartShippingCharge($cart, $preDiscountShippingCharge);
+            $cart->shippingRulesApplied = false;
+            $cart->save();
+        }
+
+        // For dynamic RC + inclusive pricing, reduce the shipping charge to net before storing.
+        // The fluent_cart/cart/shipping_total filter (registered by TaxModule) handles the logic.
+        $shippingCharge = apply_filters('fluent_cart/cart/shipping_total', $shippingCharge, ['cart' => $cart]);
+
+        // The discount has to be counted in the same money as the charge it is
+        // stored beside, or a receipt adding the two back together names a price
+        // the order never had. The filter above can turn both into net amounts,
+        // and it stops at zero, so the full price goes through it as well.
+        if ($shippingDiscount > 0) {
+            $preDiscountShippingCharge = (int)apply_filters(
+                'fluent_cart/cart/shipping_total',
+                $preDiscountShippingCharge,
+                ['cart' => $cart]
+            );
+            $shippingDiscount = max(0, $preDiscountShippingCharge - (int)$shippingCharge);
+        }
+
+        // Every stage above priced the cart at the lock accepted on entry;
+        // refuse rather than build the order at a rate the shopper was not shown
+        $lockChanged = CartCurrency::heldLockChanged($cart);
+        if ($lockChanged) {
+            static::refuseForCurrency($cart, $lockChanged);
+        }
+
+        // Last chance to write into cart_data before the order is built from it.
+        // The helper's copy was read before $cart was recalculated; build the order
+        // from $cart so a discount withdrawn on a retry can't be counted twice.
+        $cartCheckoutHelper->setCart($cart);
+
+        do_action('fluent_cart/checkout/before_order_processing', [
+            'cart' => $cart,
+        ]);
+
+        $checkoutProcessor = new CheckoutProcessor($cartCheckoutHelper->getItems(), [
+            'currency_snapshot'         => $currencySnapshot,
+            'customer_id'               => $customer->id,
+            'user_tz'                   => $userTz,
+            'create_account_after_paid' => $shouldCreateUser ? 'yes' : 'no',
+            'shipping_charge'           => $shippingCharge,
+            'shipping_method_id'        => $shippingMethod ? static::normalizeShippingMethodId(Arr::get($shippingMethod, 'id')) : 0,
+            'shipping_method_title'     => $shippingMethod ? (string) Arr::get($shippingMethod, 'title', '') : '',
+            'shipping_carrier'          => $shippingMethod ? (string) Arr::get($shippingMethod, 'carrier', '') : '',
+            'shipping_quote'            => static::shippingQuoteSnapshot($shippingMethod),
+            'shipping_discount'         => $shippingDiscount,
+            'tax_total'                 => $taxTotal,
+            'tax_behavior'              => $taxBehavior,
+            'store_tax_behavior'        => $storeTaxBehavior,
+            'exclusive_tax_total'       => $exclusiveTaxTotal,
+            'fee_tax'                   => $feeTax,
+            'fee_tax_lines'             => $feeTaxLines,
+            'shipping_tax'              => $shippingTax,
+            'payment_method'            => $paymentMethod,
+            'applied_coupons'           => $cart->getDiscountLines(),
+            'billing_address'           => Arr::get($orderData, 'billing_address', []),
+            'shipping_address'          => Arr::get($orderData, 'shipping_address', []),
+            'cart_hash'                 => $cart->cart_hash,
+            'is_locked'                 => $isLockedCart,
+            'manual_discount_total'     => $cartCheckoutHelper->getManualDiscountAmount(),
+            'prorate_credit'            => (int) Arr::get($cart->checkout_data, 'prorate_credit.amount', 0),
+            'upgrade_discount'          => (int) Arr::get($cart->checkout_data, 'upgrade_discount.amount', 0),
+            'ip_address'                => AddressHelper::getIpAddress(),
+            'note'                      => Arr::get($orderData, 'others.order_notes', ''),
+            'tax_id'                    => sanitize_text_field(
+                Arr::get($data, 'fct_billing_tax_id', '')
+                    ?: Arr::get($cart->checkout_data, 'tax_data.vat_number', '')
+            ),
+            'fees'                      => $fees,
+        ]);
+
+        $createdOrder = $checkoutProcessor->createDraftOrder($prevOrder);
+        if (is_wp_error($createdOrder)) {
+            wp_send_json([
+                'status'  => 'failed',
+                'message' => $createdOrder->get_error_message(),
+                'data'    => $createdOrder->get_error_data()
+            ], 423);
+        }
+
+        do_action('fluent_cart/order/after_items_calculated', [
+            'order'      => $createdOrder,
+            'cart'       => $cart,
+            'cart_items' => $cartCheckoutHelper->getItems(),
+        ]);
+
+        // prepare other data if any module needs to add data to the order data
+        do_action('fluent_cart/checkout/prepare_other_data', [
+            'cart'           => $cart,
+            'order'          => $createdOrder,
+            'prev_order'     => $prevOrder,
+            'request_data'   => $data,
+            'validated_data' => $validatedData
+        ]);
+
+        static::finalizeOrder($createdOrder, [
+            'billing_address'  => Arr::get($orderData, 'billing_address', []),
+            'shipping_address' => Arr::get($orderData, 'shipping_address', []),
+            'items'            => $cartCheckoutHelper->getItems(),
+            'from_checkout'    => true,
+            'prev_order'       => $prevOrder
+        ]);
+    }
+
+    /**
+     * Set the postage the cart advertises.
+     *
+     * The tax pipeline reads the charge from here rather than from any local
+     * amount, so this is how a shipping discount is made visible to it. Does not
+     * persist — the caller decides, because during a tax recalculation the
+     * recalculation saves the cart itself.
+     *
+     * @param Cart $cart
+     * @param int $charge In cents.
+     * @return void
+     */
+    private static function setCartShippingCharge(Cart $cart, $charge)
+    {
+        $checkoutData = $cart->checkout_data ?? [];
+        Arr::set($checkoutData, 'shipping_data.shipping_charge', (int)$charge);
+        $cart->checkout_data = $checkoutData;
+    }
+
+    /**
+     * Record the method this order is paid with as both the cart's payment
+     * method and the form's choice, so nothing that prices the order reads an
+     * earlier click instead — the page saves the radio separately, and that
+     * save can lag, name a method no longer offered, or be sent on its own.
+     *
+     * @param Cart $cart
+     * @param string $paymentMethod
+     * @return void
+     */
+    private static function setPaymentMethod(Cart $cart, $paymentMethod)
+    {
+        $checkoutData = $cart->checkout_data ?? [];
+        $checkoutData['payment_method'] = $paymentMethod;
+        Arr::set($checkoutData, 'form_data._fct_pay_method', $paymentMethod);
+        $cart->checkout_data = $checkoutData;
+    }
+
+    /**
+     * Record the submitted checkout fields as the cart's form, so nothing that
+     * prices the order reads an earlier save instead. A field the form did not
+     * send keeps its saved value.
+     *
+     * Country, state, city, postcode, the ship-elsewhere and business toggles
+     * are left as saved: tax is worked out from them, and the page refreshes
+     * the summary each time one of them is saved, so the saved values are the
+     * ones the shopper saw the order priced for.
+     *
+     * @param Cart $cart
+     * @param array $data
+     * @return void
+     */
+    private static function setFormFields(Cart $cart, array $data)
+    {
+        $checkoutData = $cart->checkout_data ?? [];
+
+        $fields = [
+            'full_name', 'first_name', 'last_name', 'address_1', 'address_2',
+            'phone', 'company_name', 'legal_registration_id'
+        ];
+
+        foreach ($fields as $field) {
+            foreach (['billing_', 'shipping_'] as $prefix) {
+                $value = Arr::get($data, $prefix . $field);
+                if (is_scalar($value)) {
+                    Arr::set($checkoutData, 'form_data.' . $prefix . $field, sanitize_text_field((string)$value));
+                }
+            }
+        }
+
+        $cart->checkout_data = $checkoutData;
+    }
+
+    private static function getOrCreateCustomer(CartCheckoutHelper $cartCheckoutHelper, $orderData)
+    {
+        $customer = is_user_logged_in() ? ApiCustomerResource::getCurrentCustomer() : null;
+        $email = static::getCustomerEmail($orderData['billing_address']);
+        Arr::set($orderData, 'billing_address.email', $email);
+        if (!$customer) {
+            // Reuse the email's customer for the purchase without granting ownership.
+            $customer = Customer::query()->where('email', $email)->orderBy('id')->first();
+        }
+
+        return static::createCustomerWithAddress(
+            $customer,
+            $orderData,
+            $orderData['billing_address'],
+            $orderData['shipping_address']
+        );
+    }
+
+    private static function prepareAddressData($data)
+    {
+        $shippingAddressId = Arr::get($data, 'shipping_address_id');
+        $billingAddressId = Arr::get($data, 'billing_address_id');
+        $orderId = Arr::get($data, 'order_id', null);
+
+        $currentCustomer = is_user_logged_in() ? ApiCustomerResource::getCurrentCustomer() : null;
+
+        // An email match assigns the order's customer but does not prove address ownership.
+        if (!$currentCustomer) {
+            unset($data['billing_address'], $data['shipping_address']);
+        }
+
+        $shipToDifferent = Arr::get($data, 'ship_to_different', 'no');
+
+        $datKeys = ['country', 'address_1', 'address_2', 'city', 'state', 'postcode', 'phone', 'label', 'company_name', 'vat_number', 'legal_registration_id'];
+
+        if ($billingAddressId) {
+            $prevOrder = Order::query()->find($orderId);
+            $prevBillingId = null;
+            if ($prevOrder) {
+                $prevBillingAddress = $prevOrder->billing_address;
+                $prevBillingId = Arr::get($prevBillingAddress, 'id');
+            }
+
+            $billingAddress = null;
+            if ($orderId && $prevBillingId == $billingAddressId) {
+                $billingAddress = OrderAddress::query()
+                    ->where('id', $billingAddressId)
+                    ->where('type', 'billing')
+                    ->first();
+            }
+            if (empty($billingAddress) && $currentCustomer) {
+                $billingAddress = CustomerAddresses::query()
+                    ->where('id', $billingAddressId)
+                    ->where('type', 'billing')
+                    ->where('customer_id', $currentCustomer->id)
+                    ->first();
+            }
+
+            if ($billingAddress) {
+                foreach ($datKeys as $key) {
+                    $data['billing_' . $key] = $billingAddress->{$key} ?: Arr::get($data, 'billing_' . $key, '');
+                }
+            }
+        }
+
+        if (Arr::get($data, 'is_business', 'no') !== 'yes' && !CheckoutFieldsSchema::isB2BOnlyMode()) {
+            $data['billing_company_name'] = '';
+            $data['billing_legal_registration_id'] = '';
+        }
+
+        if ($shippingAddressId && $shipToDifferent === 'yes') {
+            $prevShippingOrder = Order::query()->find($orderId);
+            $prevShippingAddress = $prevShippingOrder ? $prevShippingOrder->shipping_address : null;
+            $prevShippingId = Arr::get($prevShippingAddress, 'id', null);
+            $shippingAddress = null;
+            if ($orderId && $prevShippingId == $shippingAddressId) {
+                $shippingAddress = OrderAddress::query()
+                    ->where('id', $shippingAddressId)
+                    ->where('type', 'shipping')
+                    ->first();
+            }
+            if (empty($shippingAddress) && $currentCustomer) {
+                $shippingAddress = CustomerAddresses::query()
+                    ->where('id', $shippingAddressId)
+                    ->where('type', 'shipping')
+                    ->where('customer_id', $currentCustomer->id)
+                    ->first();
+            }
+
+            if ($shippingAddress) {
+                $formFullName = Arr::get($data, 'shipping_full_name', '');
+                $data['shipping_full_name'] = $shippingAddress->name ?: $formFullName;
+                foreach ($datKeys as $key) {
+                    $data['shipping_' . $key] = $shippingAddress->{$key} ?: Arr::get($data, 'shipping_' . $key, '');
+                }
+            }
+        } else if ($shipToDifferent !== 'yes') {
+            // if not different shipping, copy billing to shipping
+            foreach ($datKeys as $key) {
+                $data['shipping_' . $key] = Arr::get($data, 'billing_' . $key, '');
+            }
+            $data['shipping_full_name'] = Arr::get($data, 'billing_full_name', '');
+        }
+
+        return $data;
+    }
+
+    private static function addLoggedUserData(array $data): array
+    {
+        if (is_user_logged_in()) {
+            $checkoutHelper = CartCheckoutHelper::make();
+            $data['billing_email'] = wp_get_current_user()->user_email;
+
+            if (CheckoutFieldsSchema::isFullNameRequired()) {
+                $userFullName = $checkoutHelper->getFullName();
+                if (!empty($userFullName) && empty($data['billing_full_name'])) {
+                    $data['billing_full_name'] = $userFullName;
+                }
+            } else {
+                $firstName = $checkoutHelper->getFirstName();
+                if (!empty($firstName) && empty($data['billing_first_name'])) {
+                    $data['billing_first_name'] = $firstName;
+                }
+
+                $lastName = $checkoutHelper->getLastName();
+                if (!empty($lastName) && empty($data['billing_last_name'])) {
+                    $data['billing_last_name'] = $lastName;
+                }
+
+            }
+
+
+        }
+        return $data;
+    }
+
+    private static function finalizeOrder(Order $order, $args = [])
+    {
+        // Duplicate/concurrent submissions are already serialized by the cart-hash lock
+        // at the top of placeOrder() — no per-order lock needed here.
+        AddressHelper::insertOrderAddresses(
+            $order->id,
+            Arr::get($args, 'billing_address', []),
+            Arr::get($args, 'shipping_address', [])
+        );
+
+        static::syncCustomerNames($order, $args);
+        $cart = CartHelper::getCart();
+
+        $utmData = UtmHelper::resolveUtmData(
+            UtmHelper::getUtmDataOfRequest(),
+            !empty($cart) ? $cart->utm_data : []
+        );
+        UtmHelper::addUtmToOrder($order->id, $utmData);
+
+        $prevOrder = Arr::get($args, 'prev_order', null);
+
+        (new OrderCreated($order, $prevOrder, $order->customer, $order->getLatestTransaction()))->dispatch();
+
+        static::updateStock($order);
+
+        // we don't have to validate the payment method again, as it's already validated in placeOrder method
+        $gateway = App::gateway($order->payment_method);
+
+        if (!$gateway) {
+            wp_send_json([
+                'status'  => 'failed',
+                'message' => __('Payment method not found!', 'fluent-cart'),
+                'data'    => []
+            ], 404);
+        }
+
+        $paymentInstance = new PaymentInstance($order);
+
+        // Transition subscription from pending → intended before submitting to the gateway
+        if ($paymentInstance->subscription && $paymentInstance->subscription->status === Status::SUBSCRIPTION_PENDING) {
+            $paymentInstance->subscription->status = Status::SUBSCRIPTION_INTENDED;
+            $paymentInstance->subscription->save();
+        }
+
+        $data = $gateway->makePaymentFromPaymentInstance($paymentInstance);
+
+        if (is_wp_error($data)) {
+            // Server-observed create failure: mark the transaction FAILED so the next
+            // resubmit is a RETRY (payment_attempt bump -> fresh idempotency seed) —
+            // gateways cache error responses under the key, so keeping it pending would
+            // replay the same error on every resubmit. Client-side declines stay pending
+            // on purpose: there the same key resolving to the same gateway object IS the
+            // retry path.
+            if ($paymentInstance->transaction && $paymentInstance->transaction->status === Status::PAYMENT_PENDING) {
+                $paymentInstance->transaction->update(['status' => Status::PAYMENT_FAILED]);
+            }
+
+            wp_send_json([
+                'status'  => 'failed',
+                'message' => $data->get_error_message(),
+                'data'    => $data->get_error_data()
+            ], 422);
+        }
+
+        wp_send_json($data, 200);
+    }
+
+    /**
+     * Serialize checkout submissions per cart with a MySQL named lock.
+     *
+     * Keyed on cart_hash (not order id) so concurrent FIRST submissions — no draft
+     * order yet — contend on the same lock. Release goes through a shutdown function,
+     * not try/finally: wp_send_json() exits via die() (skips finally), and persistent
+     * DB connections don't drop the lock on request end.
+     */
+    private static function acquireCartLock($cartHash)
+    {
+        global $wpdb;
+
+        // md5 keeps the name inside MySQL's 64-char lock-name limit regardless of
+        // table-prefix length; the prefix scopes the lock per site on multisite.
+        $lockName = 'fct_checkout_' . md5($wpdb->prefix . $cartHash);
+
+        $lockAcquired = (string) $wpdb->get_var(
+            $wpdb->prepare('SELECT GET_LOCK(%s, %d)', $lockName, 10)
+        ) === '1';
+
+        if (!$lockAcquired) {
+            wp_send_json([
+                'status'  => 'failed',
+                'message' => __('This order is already being processed. Please wait a moment — do not refresh or resubmit.', 'fluent-cart'),
+                'data'    => []
+            ], 429);
+        }
+
+        register_shutdown_function(function () use ($lockName) {
+            global $wpdb;
+            $wpdb->get_var($wpdb->prepare('SELECT RELEASE_LOCK(%s)', $lockName));
+        });
+    }
+
+    private static function syncCustomerNames($order, $args)
+    {
+        $customer = $order->customer;
+
+        if (empty($customer) || !is_user_logged_in() || (int) $customer->user_id !== get_current_user_id()
+            || EmailVerificationService::isRequired(get_current_user_id())) {
+            return;
+        }
+
+        $firstName = Arr::get($args, 'billing_address.first_name');
+        $lastName = Arr::get($args, 'billing_address.last_name');
+
+        $customer->update([
+            'first_name' => $firstName,
+            'last_name'  => $lastName,
+        ]);
+
+        // Keep profile updates tied to the buyer's stored account link too.
+        if (is_user_logged_in() && (int) $customer->user_id === get_current_user_id()) {
+            update_user_meta(get_current_user_id(), 'first_name', $firstName);
+            update_user_meta(get_current_user_id(), 'last_name', $lastName);
+        }
+    }
+
+    public static function updateStock($order)
+    {
+        // pluck product ids to update product default variation as stock has changed
+        $productIds = OrderService::pluckProductIds($order);
+        if (!empty($productIds)) {
+            (new StockChanged($productIds))->dispatch();
+        }
+    }
+
+    public static function createCustomerWithAddress($customer, $orderData, $billingAddress, $shippingAddress)
+    {
+        if (empty($customer)) {
+            $customer = static::createNewCustomer($orderData, $billingAddress, $shippingAddress);
+        } else if ($customer instanceof Customer) {
+            static::updateExistingCustomer($customer, $orderData, $billingAddress, $shippingAddress);
+        }
+
+        return $customer;
+    }
+
+    private static function createNewCustomer($orderData, &$billingAddress, $shippingAddress)
+    {
+        global $current_user;
+        if ($current_user->ID) {
+            $billingAddress['email'] = $current_user->user_email;
+            $billingAddress['user_id'] = $current_user->ID;
+        } else {
+            unset($billingAddress['user_id']);
+        }
+
+        $customer = CustomerResource::create($billingAddress);
+        $customer = Arr::get($customer, 'data', null);
+        $customerId = Arr::get($customer, 'id', null);
+        if ($customer && $customer->wasRecentlyCreated) {
+            static::createCustomerAddress($billingAddress, $customerId);
+            static::createCustomerAddress($shippingAddress, $customerId);
+        }
+
+        return $customer;
+    }
+
+    private static function updateExistingCustomer($customer, $orderData, $billingAddress, $shippingAddress)
+    {
+        // Order addresses come from this checkout; saved profile data needs proof.
+        if (!is_user_logged_in() || (int) $customer->user_id !== get_current_user_id()
+            || EmailVerificationService::isRequired(get_current_user_id())) {
+            return;
+        }
+        $customer->load(['billing_address', 'shipping_address']);
+
+        if ($customer->billing_address->count() < 1) {
+            static::createCustomerAddress($billingAddress, $customer->id);
+        }
+        if ($customer->shipping_address->count() < 1) {
+            static::createCustomerAddress($shippingAddress, $customer->id);
+        }
+    }
+
+    private static function getCustomerEmail($billingAddress)
+    {
+        return is_user_logged_in() ? wp_get_current_user()->user_email : $billingAddress['email'];
+    }
+
+    public static function shouldCreateUser($data, $billingAddress): bool
+    {
+        $accountCreationMod = (new StoreSettings())->get('user_account_creation_mode');
+        $hasSubscription = (CartCheckoutHelper::make())->hasSubscription() === 'yes';
+        if ($accountCreationMod === 'all' || $hasSubscription) {
+            return true;
+        }
+
+        if (is_user_logged_in()) {
+            return false;
+        }
+
+        $allow_create_account = Arr::get($data, 'others.allow_create_account') === 'yes';
+
+        $userEmail = Arr::get($billingAddress, 'email');
+        $user = get_user_by('email', $userEmail);
+
+        return ($allow_create_account && $accountCreationMod === 'user_choice') || !empty($user);
+    }
+
+    private static function createCustomerAddress(array $address, $customerId)
+    {
+        CustomerAddressResource::create($address, ['id' => $customerId]);
+    }
+
+    /**
+     * Check if a customer is logged in and has the given address type.
+     *
+     * @param string $type Address type to check ('billing' or 'shipping').
+     * @return bool True if the customer is logged in and the address is available.
+     */
+    private static function hasCustomerWithAddress(string $type): bool
+    {
+        $addressType = $type . '_address';
+        $currentCustomer = \FluentCart\Api\Resource\CustomerResource::getCurrentCustomer();
+
+        return !empty($currentCustomer) && $currentCustomer->$addressType->count() === 1;
+    }
+
+
+    /**
+     * Validate the data against the provided rules.
+     * @return array
+     */
+
+    public static function billingRules($data = []): array
+    {
+        $baseRules = [
+            'billing_full_name' => 'required|sanitizeText|maxLength:255',
+            'billing_email'     => 'required|sanitizeText|email|maxLength:255',
+            'order_notes'       => 'nullable|sanitizeTextArea|maxLength:200',
+        ];
+
+        return static::generateAddressRules('billing', $data, $baseRules, 'getBillingAddressFields');
+    }
+
+    public static function shippingIdRules(): array
+    {
+        return [
+            'shipping_address' => 'exists:fct_customer_addresses,id',
+        ];
+    }
+
+    public static function shippingRules($data = []): array
+    {
+        $baseRules = [
+            'shipping_full_name' => 'required|sanitizeText|maxLength:255'
+        ];
+
+        return static::generateAddressRules('shipping', $data, $baseRules, 'getShippingAddressFields');
+
+    }
+
+    /**
+     * Validate the data against the provided rules.
+     *
+     * @return false|\WP_Error|string
+     */
+
+    public static function validateData($data, Cart $cart, CheckoutService $cartCheckoutService, $prevOrder)
+    {
+        $data = static::stripSmartCodes($data);
+
+        $shippingRequired = $cart->requireShipping();
+        $isDifferentShipping = $shippingRequired && Arr::get($data, 'ship_to_different', 'no') === 'yes';
+        $fulfillmentType = $shippingRequired ? 'physical' : 'digital';
+
+        $billingValidations = array_filter(CheckoutFieldsSchema::getCheckoutFieldsRequirements('billing', $fulfillmentType, !$isDifferentShipping));
+
+        // Name fields are validated separately below (full_name/first_name/last_name)
+        // vat_number uses field name fct_billing_tax_id and is validated separately in the B2B block below
+        unset($billingValidations['full_name'], $billingValidations['first_name'], $billingValidations['last_name'], $billingValidations['vat_number']);
+
+        if (!isset($billingValidations['country']) && empty($data['billing_country'])) {
+            $data['billing_country'] = (new StoreSettings())->get('store_country');
+        }
+
+        $billingAddress = [];
+        foreach ($billingValidations as $key => $billingValidation) {
+            $billingAddress[$key] = Arr::get($data, 'billing_' . $key, '');
+        }
+        if (!isset($billingAddress['country'])) {
+            $billingAddress['country'] = !empty($data['billing_country'])
+                ? $data['billing_country']
+                : (new StoreSettings())->get('store_country');
+        }
+
+        $shippingAddress = [];
+        $shippingValidations = [];
+        if ($isDifferentShipping) {
+            $shippingValidations = array_filter(CheckoutFieldsSchema::getCheckoutFieldsRequirements('shipping', 'physical'));
+            // Name fields are validated via billing basic_info, not shipping address
+            unset($shippingValidations['full_name'], $shippingValidations['first_name'], $shippingValidations['last_name'], $shippingValidations['company_name']);
+            foreach ($shippingValidations as $key => $shippingValidation) {
+                $shippingAddress[$key] = Arr::get($data, 'shipping_' . $key, '');
+            }
+        }
+
+        if (Arr::get($data, 'ship_to_different', 'no') === 'yes') {
+            if (!isset($data['shipping_country'])) {
+                // get store country
+                $data['shipping_country'] = (new StoreSettings())->get('store_country');
+            }
+            if (!isset($shippingAddress['country'])) {
+                // get store country
+                $shippingAddress['country'] = (new StoreSettings())->get('store_country');
+            }
+
+        }
+
+        $errors = [];
+
+        $agreeTermsRequired = CheckoutFieldsSchema::isTermsRequired();
+
+        $customTitles = [
+            'address_1' => __('Street Address', 'fluent-cart'),
+            'address_2' => __('Apt, Suite, Unit', 'fluent-cart'),
+            'country'   => __('Country', 'fluent-cart'),
+            'state'     => __('State', 'fluent-cart'),
+            'city'      => __('City', 'fluent-cart'),
+            'postcode'  => __('Postcode', 'fluent-cart'),
+            'phone'     => __('Phone', 'fluent-cart'),
+        ];
+
+        foreach ($billingValidations as $key => $rule) {
+            $value = Arr::get($billingAddress, $key, '');
+            $prefixedKey = 'billing_' . $key;
+            $titledKey = $customTitles[$key] ?? Str::headline($key);
+
+            if ($key === 'country') {
+                $countries = LocalizationManager::getInstance()->countries();
+
+                if ($rule === 'required' && empty($value)) {
+                    if (!isset($errors[$key])) {
+                        $errors[$prefixedKey] = [];
+                    }
+                    $errors[$prefixedKey]['required'] = sprintf(
+                    /* translators: %s attribute name */
+                        __('%s is required.', 'fluent-cart'),
+                        $titledKey
+                    );
+                    continue;
+                }
+
+                if (!empty($value) && !Arr::has($countries, $value)) {
+                    if (!isset($errors[$key])) {
+                        $errors[$prefixedKey] = [];
+                    }
+                    $errors[$prefixedKey]['invalid'] = sprintf(
+                    /* translators: %s attribute name */
+                        __('%s is invalid.', 'fluent-cart'),
+                        $titledKey
+                    );
+                    continue;
+                }
+
+                continue;
+            }
+
+            if ($key === 'state') {
+                $country = Arr::get($billingAddress, 'country', '');
+
+                $states = LocalizationManager::getInstance()->statesOptions($country);
+
+                if (empty($states)) {
+                    continue;
+                }
+
+                if ($rule === 'required' && empty($value)) {
+                    if (!isset($errors[$key])) {
+                        $errors[$prefixedKey] = [];
+                    }
+                    $errors[$prefixedKey]['required'] = sprintf(
+                    /* translators: %s attribute name */
+                        __('%s is required.', 'fluent-cart'),
+                        $titledKey
+                    );
+                    continue;
+                }
+
+                if (!empty($value) && !in_array($value, array_column($states, 'value'))) {
+                    if (!isset($errors[$key])) {
+                        $errors[$prefixedKey] = [];
+                    }
+                    $errors[$prefixedKey]['invalid'] = sprintf(
+                    /* translators: %s attribute name */
+                        __('%s is invalid.', 'fluent-cart'),
+                        $titledKey
+                    );
+                }
+
+                continue;
+            }
+
+            if ($rule === 'required' && empty($value)) {
+                if (!isset($errors[$key])) {
+                    $errors[$prefixedKey] = [];
+                }
+                $errors[$prefixedKey]['required'] = sprintf(
+                /* translators: %s attribute name */
+                    __('%s is required.', 'fluent-cart'),
+                    $titledKey
+                );
+            }
+        }
+
+        foreach ($shippingValidations as $key => $rule) {
+            $value = Arr::get($shippingAddress, $key, '');
+            $prefixedKey = 'shipping_' . $key;
+            $titledKey = $customTitles[$key] ?? Str::headline($key);
+
+            if ($key === 'country') {
+                $countries = LocalizationManager::getInstance()->countries();
+
+                if ($rule === 'required' && empty($value)) {
+                    if (!isset($errors[$key])) {
+                        $errors[$prefixedKey] = [];
+                    }
+                    $errors[$prefixedKey]['required'] = sprintf(
+                    /* translators: %s attribute name */
+                        __('%s is required.', 'fluent-cart'),
+                        $titledKey
+                    );
+
+                    continue;
+                }
+
+                if (!empty($value) && !Arr::has($countries, $value)) {
+                    if (!isset($errors[$key])) {
+                        $errors[$prefixedKey] = [];
+                    }
+                    $errors[$prefixedKey]['invalid'] = sprintf(
+                    /* translators: %s attribute name */
+                        __('%s is invalid.', 'fluent-cart'),
+                        $titledKey
+                    );
+                    continue;
+                }
+
+                continue;
+            }
+
+            if ($key === 'state') {
+                $country = Arr::get($shippingAddress, 'country', '');
+
+                $states = LocalizationManager::getInstance()->statesOptions($country);
+
+                if (empty($states)) {
+                    continue;
+                }
+
+                if ($rule === 'required' && empty($value)) {
+                    if (!isset($errors[$key])) {
+                        $errors[$prefixedKey] = [];
+                    }
+                    $errors[$prefixedKey]['required'] = sprintf(
+                    /* translators: %s attribute name */
+                        __('%s is required.', 'fluent-cart'),
+                        $titledKey
+                    );
+
+                    continue;
+                }
+
+                if (!empty($value) && !in_array($value, array_column($states, 'value'))) {
+                    if (!isset($errors[$key])) {
+                        $errors[$prefixedKey] = [];
+                    }
+                    $errors[$prefixedKey]['invalid'] = sprintf(
+                    /* translators: %s attribute name */
+                        __('%s is invalid.', 'fluent-cart'),
+                        $titledKey
+                    );
+                }
+
+                continue;
+            }
+
+            if ($rule === 'required' && empty($value)) {
+                if (!isset($errors[$key])) {
+                    $errors[$prefixedKey] = [];
+                }
+                $errors[$prefixedKey]['required'] = sprintf(
+                /* translators: %s attribute name */
+                    __('%s is required.', 'fluent-cart'),
+                    $titledKey
+                );
+            }
+        }
+
+        $basicInfoFields = (CheckoutFieldsSchema::getNameEmailFieldsSchema())['fields'];
+
+        foreach ($basicInfoFields as $field) {
+            $fieldName = (string)Arr::get($field, 'name', '');
+            $isRequired = Arr::get($field, 'required', 'no') === 'yes';
+            if ($fieldName && $isRequired) {
+                $value = Arr::get($data, $fieldName, '');
+                if (empty($value)) {
+                    Arr::set($errors, $fieldName . '.required', sprintf(
+                    /* translators: %s attribute name */
+                        __('%s is required.', 'fluent-cart'),
+                        Arr::get($field, 'aria-label')
+                    ));
+                }
+            }
+        }
+
+        $isB2B = Arr::get($data, 'is_business', 'no') === 'yes' || CheckoutFieldsSchema::isB2BOnlyMode();
+
+        if ($isB2B && CheckoutFieldsSchema::isVatNumberRequired()) {
+            $vatNumber = Arr::get($data, 'fct_billing_tax_id', '');
+            if (empty($vatNumber)) {
+                $errors['fct_billing_tax_id']['required'] = __('VAT / Tax ID is required.', 'fluent-cart');
+            }
+        }
+
+        if ($isB2B && CheckoutFieldsSchema::isCompanyNameRequired()) {
+            $companyName = Arr::get($data, 'billing_company_name', '');
+            if (empty($companyName)) {
+                $errors['billing_company_name']['required'] = __('Company Name is required.', 'fluent-cart');
+            }
+        }
+
+        if ($isB2B && CheckoutFieldsSchema::isLegalRegistrationIdRequired()) {
+            $legalRegId = Arr::get($data, 'billing_legal_registration_id', '');
+            if (empty($legalRegId)) {
+                $errors['billing_legal_registration_id']['required'] = __('Legal Registration ID is required.', 'fluent-cart');
+            }
+        }
+
+        if (empty($data['agree_terms']) && $agreeTermsRequired) {
+            $errors['agree_terms']['required'] = __('You must agree to the terms and conditions.', 'fluent-cart');
+        }
+
+        if (empty($data['billing_email']) || !is_email($data['billing_email'])) {
+            $errors['billing_email']['invalid'] = __('Email must be a valid email address.', 'fluent-cart');
+        }
+
+        if (CheckoutFieldsSchema::isFullNameRequired()) {
+            if (empty($data['billing_full_name'])) {
+                $errors['billing_full_name']['required'] = __('Full name is required.', 'fluent-cart');
+            }
+        } else {
+            if (empty($data['billing_first_name'])) {
+                $errors['billing_first_name']['required'] = __('First name is required.', 'fluent-cart');
+            }
+
+            if(CheckoutFieldsSchema::isLastNameRequired()) {
+                if (empty($data['billing_last_name'])) {
+                    $errors['billing_last_name']['required'] = __('Last name is required.', 'fluent-cart');
+                }
+            }
+        }
+
+        // Password managers that cannot reach the card iframe sometimes type the
+        // card number into the focused name field. Stripe rejects that name, and
+        // we must not store the number.
+        foreach (['billing_full_name', 'billing_first_name', 'billing_last_name'] as $nameKey) {
+            if (empty($errors[$nameKey]) && static::containsCardNumber(Arr::get($data, $nameKey, ''))) {
+                $errors[$nameKey]['card_number'] = __('Please remove the card number from the name field. Enter your card details in the payment section.', 'fluent-cart');
+            }
+        }
+
+
+        if ($cart->requireShipping()) {
+            if (!empty($data['fc_selected_shipping_method'])) {
+                // One id, decided here, is both what is checked and what placeOrder() prices.
+                // A loose compare let PHP 7.4 match "1<b>2" to method 1, and sanitize_text_field()
+                // then turned the same string into "12", so the order was priced by method 12.
+                // A zone method id must be a plain integer; a carrier token must equal a listed
+                // rate id exactly.
+                $rawMethod = $data['fc_selected_shipping_method'];
+                $isPlainId = (is_string($rawMethod) || is_int($rawMethod)) && (string) absint($rawMethod) === (string) $rawMethod;
+                $selectedMethod = $isPlainId ? absint($rawMethod) : (is_string($rawMethod) ? $rawMethod : 0);
+                $data['fc_selected_shipping_method'] = $isPlainId ? $selectedMethod : 0;
+
+                [$shippingCountry, $shippingState, $destination] = static::shippingDestination($data);
+
+                $availableShippingMethods = AddressHelper::getShippingMethods($shippingCountry, $shippingState, null, (array) $cart->cart_data, $destination);
+
+
+                if (empty($availableShippingMethods) || is_wp_error($availableShippingMethods)) {
+                    $errors['shipping_method']['unavailable'] = __('We don\'t ship to this address. Please select a different address.', 'fluent-cart');
+                } else {
+                    $resolved = AddressHelper::findRate($availableShippingMethods, $selectedMethod);
+
+                    if (!$resolved) {
+                        $errors['shipping_method']['invalid'] = __('The selected shipping method is not available.', 'fluent-cart');
+                    } else if (!$isPlainId) {
+                        $data['fc_selected_shipping_method'] = (string) Arr::get($resolved, 'id');
+                    }
+                }
+
+
+            } else {
+                $errors['shipping_method']['required'] = __('You must select a shipping method.', 'fluent-cart');
+            }
+        }
+
+        $errors = apply_filters('fluent_cart/checkout/validate_data', $errors, [
+            'data' => $data,
+            'cart' => $cart
+        ]);
+
+        if (count($errors) > 0) {
+            return new \Wp_Error('validation_error', __('Validation error', 'fluent-cart'), $errors);
+        }
+
+        return $data;
+    }
+
+    /**
+     * The address the order ships to: billing, or the shipping fields when the
+     * shopper ships elsewhere.
+     *
+     * @return array [country, state, ['postcode' => , 'city' => ]]
+     */
+    protected static function shippingDestination(array $data): array
+    {
+        $prefix = Arr::get($data, 'ship_to_different', 'no') === 'yes' ? 'shipping_' : 'billing_';
+
+        return [
+            Arr::get($data, $prefix . 'country', ''),
+            Arr::get($data, $prefix . 'state', ''),
+            [
+                'postcode'  => (string) Arr::get($data, $prefix . 'postcode', ''),
+                'city'      => (string) Arr::get($data, $prefix . 'city', ''),
+                'form_data' => $data,
+            ] + AddressHelper::quoteContact($data),
+        ];
+    }
+
+    /**
+     * The selected rate from the address's rate list, priced against the real cart.
+     * Validation and the charge both resolve here, so they cannot disagree.
+     *
+     * @param array      $data       Checkout data.
+     * @param array      $cartItems  Cart line items.
+     * @param int|string $selectedId Validated zone method id or carrier token.
+     * @return array|null Rate array (see CarrierContract::getRates).
+     */
+    protected static function resolveShippingRate(array $data, array $cartItems, $selectedId): ?array
+    {
+        if (!$selectedId) {
+            return null;
+        }
+
+        [$country, $state, $destination] = static::shippingDestination($data);
+
+        return AddressHelper::resolveSelectedRate($country, $state, $cartItems, $selectedId, $destination);
+    }
+
+    /**
+     * Zone method ids stay integers (stored config expects that); carrier tokens stay strings.
+     *
+     * @param mixed $id
+     * @return int|string
+     */
+    protected static function normalizeShippingMethodId($id)
+    {
+        return is_numeric($id) ? (int) $id : (string) $id;
+    }
+
+    /**
+     * What a live carrier quoted, kept on the order beside the converted charge.
+     */
+    protected static function shippingQuoteSnapshot(?array $rate): array
+    {
+        if (!$rate || Arr::get($rate, 'carrier', 'manual') === 'manual') {
+            return [];
+        }
+
+        return [
+            'carrier'         => (string) Arr::get($rate, 'carrier', ''),
+            'rate_id'         => (string) (Arr::get($rate, 'provider_rate_id') ?: Arr::get($rate, 'id', '')),
+            'source_cost'     => Helper::roundCent(Arr::get($rate, 'source_cost', 0)),
+            'source_currency' => (string) Arr::get($rate, 'source_currency', ''),
+        ];
+    }
+
+    /**
+     * Checkout inputs are customer-typed: a {{...}} smartcode pasted into one is
+     * removed before validation, so it never reaches stored order data. Only the
+     * brace form is stripped — # and ## appear legitimately in street addresses.
+     */
+    private static function stripSmartCodes(array $data): array
+    {
+        foreach ($data as $key => $value) {
+            if (is_string($value) && strpos($value, '{{') !== false) {
+                $data[$key] = trim((string) preg_replace('/\{\{.*?\}\}/s', '', $value));
+            }
+        }
+
+        return $data;
+    }
+
+    /**
+     * True when the text holds a 13–19 digit run that passes the Luhn check.
+     * Spaces and dashes inside the run are allowed ("4242 4242 4242 4242").
+     * The Luhn check keeps most tax IDs that buyers type into name fields.
+     */
+    public static function containsCardNumber($text): bool
+    {
+        if (!is_string($text) || !preg_match_all('/\d(?:[ -]?\d){12,}/', $text, $matches)) {
+            return false;
+        }
+
+        foreach ($matches[0] as $run) {
+            $digits = preg_replace('/\D/', '', $run);
+            $length = strlen($digits);
+            if ($length < 13 || $length > 19) {
+                continue;
+            }
+
+            $sum = 0;
+            for ($i = 0; $i < $length; $i++) {
+                $digit = (int) $digits[$length - 1 - $i];
+                if ($i % 2 === 1) {
+                    $digit *= 2;
+                    if ($digit > 9) {
+                        $digit -= 9;
+                    }
+                }
+                $sum += $digit;
+            }
+
+            if ($sum % 10 === 0) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    public static function validateShippingMethod(array $data, CheckoutService $cartCheckoutService): bool
+    {
+
+        if ($cartCheckoutService->isAllDigital()) {
+            return true;
+        }
+
+        $shipping_country = Arr::get($data, 'shipping_country');
+        $shipping_state = Arr::get($data, 'shipping_state');
+
+
+        $methods = ShippingMethod::getApplicableForCountry($shipping_country, $shipping_state)->keyBy('id');
+        if ($methods->count() === 0 || \FluentCart\App\App::isDevMode()) {
+            return true;
+        }
+
+        $shipping_method = Arr::get($data, 'fc_selected_shipping_method');
+
+        if (empty($shipping_method)) {
+            return false;
+        }
+
+
+        $exist = $methods->has($shipping_method);
+        if (!$exist) {
+            return false;
+        }
+
+        return true;
+    }
+
+
+    public static function messages(): array
+    {
+        return [
+            'billing_full_name.required'  => esc_html__('Full name field is required.', 'fluent-cart'),
+            'billing_email.required'      => esc_html__('Email field is required.', 'fluent-cart'),
+            'billing_email.email'         => esc_html__('Email must be a valid email address.', 'fluent-cart'),
+            'billing_address.required'    => esc_html__('Address field is required.', 'fluent-cart'),
+            'billing_country.required'    => esc_html__('Country field is required.', 'fluent-cart'),
+            'billing_address_1.required'  => esc_html__('Street Address field is required.', 'fluent-cart'),
+            'billing_city.required'       => esc_html__('City field is required.', 'fluent-cart'),
+            'billing_postcode.required'   => esc_html__('Postcode field is required.', 'fluent-cart'),
+            'shipping_full_name.required' => esc_html__('Full name field is required.', 'fluent-cart'),
+            // 'shipping_email.required' => esc_html__('Email field is required.', 'fluent-cart'),
+            // 'shipping_email.email' => esc_html__('Email must be a valid email address.', 'fluent-cart'),
+            'shipping_address.required'   => esc_html__('Address field is required.', 'fluent-cart'),
+            'shipping_city.required'      => esc_html__('City field is required.', 'fluent-cart'),
+            'shipping_postcode.required'  => esc_html__('Postcode field is required.', 'fluent-cart'),
+        ];
+    }
+
+    private static function generateAddressRules($type, $data, $baseRules, $fieldGetter): array
+    {
+        $hasAddress = static::hasCustomerWithAddress($type);
+        $rules = App::localization()->getValidationRule($data, $type);
+
+        if ($hasAddress) {
+            $baseRules["{$type}_address"] = 'required|numeric';
+            return $baseRules;
+        }
+
+        $cartCheckoutHelper = CartCheckoutHelper::make();
+        $fields = $cartCheckoutHelper->{$fieldGetter}();
+        $addressFields = Arr::get($fields, 'address_section.schema', []);
+        $addressFields = Arr::wrap($addressFields);
+
+        $validFields = array_keys($addressFields);
+
+        // Add prefix to each field (billing_ or shipping_)
+        $validFields = array_map(function ($field) use ($type) {
+            return $type . '_' . $field;
+        }, $validFields);
+
+        // Filter only relevant rules
+        $filteredRules = array_filter($rules, function ($key) use ($validFields) {
+            return in_array($key, $validFields);
+        }, ARRAY_FILTER_USE_KEY);
+
+        return $baseRules + $filteredRules;
+    }
+}

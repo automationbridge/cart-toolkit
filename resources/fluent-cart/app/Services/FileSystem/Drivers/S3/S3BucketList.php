@@ -1,0 +1,186 @@
+<?php
+
+namespace FluentCart\App\Services\FileSystem\Drivers\S3;
+
+use FluentCart\Framework\Support\Arr;
+
+class S3BucketList
+{
+    private string $accessKey;
+    private string $secretKey;
+    private string $region;
+    private string $hashAlgorithm = 'sha256';
+    private string $httpMethod;
+    private string $signature;
+    private $timeStamp;
+    private $date;
+    private string $requestUrl;
+    private ?string $sessionToken = null;
+
+
+    public static function get(string $secret, string $accessKey, string $region, ?string $sessionToken = null)
+    {
+        $validation = S3InputValidator::validateRegion($region);
+        if (is_wp_error($validation)) {
+            return $validation;
+        }
+
+        return (new static($secret, $accessKey, $region, $sessionToken))->getList();
+    }
+
+    public function __construct(string $secret, string $accessKey, string $region, ?string $sessionToken = null)
+    {
+        $this->secretKey = $secret;
+        $this->accessKey = $accessKey;
+        $this->region = $region;
+        $this->sessionToken = $sessionToken;
+
+        $this->httpMethod = "GET";
+        $this->timeStamp = gmdate('Ymd\THis\Z');
+        $this->date = substr($this->timeStamp, 0, 8);
+        if ($region !== 'us-east-1' && $region) {
+            $this->requestUrl = "https://s3.{$region}.amazonaws.com"; // phpcs:ignore PluginCheck.CodeAnalysis.Offloading.OffloadedContent -- S3 API endpoint for the configured bucket, called server-side
+        } else {
+            $this->requestUrl = "https://s3.amazonaws.com"; // phpcs:ignore PluginCheck.CodeAnalysis.Offloading.OffloadedContent -- S3 API endpoint for the configured bucket, called server-side
+        }
+
+        $this->generateSignature();
+    }
+
+    public function getList()
+    {
+        add_filter('http_request_timeout', function () {
+            return 30; // Set the timeout to 30 seconds (or adjust as needed)
+        });
+
+        $response = wp_remote_request($this->requestUrl, [
+            'method'  => $this->httpMethod,
+            'headers' => $this->getHeaders()
+        ]);
+
+        if (is_wp_error($response)) {
+             return $response;
+        }
+
+        $responseCode = wp_remote_retrieve_response_code($response);
+
+        if ($responseCode == '200') {
+            return $this->parseResponseXml($response);
+        } else {
+            return new \WP_Error(
+                $responseCode,
+                __('Invalid Credential', 'fluent-cart')
+            );
+        }
+    }
+
+    private function parseResponseXml($response): array
+    {
+        $xml = simplexml_load_string(wp_remote_retrieve_body($response));
+        $array = json_decode(json_encode($xml), TRUE);
+
+        $responseBucket = Arr::get($array, 'Buckets.Bucket', []);
+
+        if(Arr::has($responseBucket,'Name')){
+            return [
+                Arr::get($responseBucket, 'Name')
+            ];
+        }
+
+        $buckets = [];
+        foreach ($responseBucket as $bucket) {
+            $buckets[] = Arr::get($bucket, 'Name');
+        }
+        return $buckets;
+    }
+
+    public function getSignature(): string
+    {
+        return $this->signature;
+    }
+
+    public function generateSignature()
+    {
+        $this->signature = $this->generateSignatureKey();
+    }
+
+    private function createScope(): string
+    {
+        return "{$this->date}/{$this->region}/s3/aws4_request";
+    }
+
+    private function getContentHash(): string
+    {
+        return hash($this->hashAlgorithm, "");
+    }
+
+    private function createCanonicalUrl(): string
+    {
+        $payload = "$this->httpMethod\n" .
+            "/\n\n" .
+            "host:{$this->getHost()}\n" .
+            "x-amz-content-sha256:{$this->getContentHash()}\n" .
+            "x-amz-date:{$this->timeStamp}\n";
+
+        if ($this->sessionToken) {
+            $payload .= "x-amz-security-token:{$this->sessionToken}\n";
+        }
+
+        $payload .= "\n";
+
+        $signedHeaders = "host;x-amz-content-sha256;x-amz-date";
+        if ($this->sessionToken) {
+            $signedHeaders .= ";x-amz-security-token";
+        }
+
+        $payload .= $signedHeaders . "\n" .
+            "{$this->getContentHash()}";
+
+        return $payload;
+    }
+
+    private function getHost(): string
+    {
+        return wp_parse_url($this->requestUrl, PHP_URL_HOST) ?: "s3.amazonaws.com"; // phpcs:ignore PluginCheck.CodeAnalysis.Offloading.OffloadedContent -- S3 API endpoint for the configured bucket, called server-side
+    }
+
+    private function createStringToSign(): string
+    {
+        $hash = hash($this->hashAlgorithm, $this->createCanonicalUrl());
+        return "AWS4-HMAC-SHA256\n{$this->timeStamp}\n{$this->createScope()}\n{$hash}";
+    }
+
+    private function getSigningKey()
+    {
+        $dateKey = hash_hmac($this->hashAlgorithm, $this->date, "AWS4{$this->secretKey}", true);
+        $regionKey = hash_hmac($this->hashAlgorithm, $this->region, $dateKey, true);
+        $serviceKey = hash_hmac($this->hashAlgorithm, 's3', $regionKey, true);
+        return hash_hmac($this->hashAlgorithm, 'aws4_request', $serviceKey, true);
+    }
+
+    private function generateSignatureKey()
+    {
+        return hash_hmac($this->hashAlgorithm, $this->createStringToSign(), $this->getSigningKey());
+    }
+
+    public function getHeaders(): array
+    {
+        $headers = [
+            "x-amz-content-sha256" => $this->getContentHash(),
+            'x-amz-date'           => $this->timeStamp,
+        ];
+
+        if ($this->sessionToken) {
+            $headers['x-amz-security-token'] = $this->sessionToken;
+        }
+
+        $signedHeaders = "host;x-amz-content-sha256;x-amz-date";
+        if ($this->sessionToken) {
+            $signedHeaders .= ";x-amz-security-token";
+        }
+
+        $headers['Authorization'] = "AWS4-HMAC-SHA256 Credential={$this->accessKey}/{$this->date}/{$this->region}/s3/aws4_request, SignedHeaders={$signedHeaders}, Signature={$this->getSignature()}";
+
+        return $headers;
+    }
+}

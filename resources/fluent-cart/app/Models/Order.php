@@ -1,0 +1,1496 @@
+<?php
+
+namespace FluentCart\App\Models;
+
+use FluentCart\App\Modules\MultiCurrency\Services\CurrencySnapshot;
+use FluentCart\Api\ModuleSettings;
+use FluentCart\App\App;
+use FluentCart\App\Helpers\Helper;
+use FluentCart\App\Helpers\Status;
+use FluentCart\App\Models\Concerns\CanSearch;
+use FluentCart\App\Models\Concerns\CanUpdateBatch;
+use FluentCart\App\Models\Concerns\HasActivity;
+use FluentCart\App\Services\DateTime\DateTime;
+use FluentCart\App\Services\OrderService;
+use FluentCart\App\Services\TemplateService;
+use FluentCart\App\Services\URL;
+use FluentCart\Framework\Database\Orm\Builder;
+use FluentCart\Framework\Database\Orm\Relations\BelongsTo;
+use FluentCart\Framework\Database\Orm\Relations\HasMany;
+use FluentCart\Framework\Database\Orm\Relations\HasManyThrough;
+use FluentCart\Framework\Database\Orm\Relations\HasOne;
+use FluentCart\Framework\Database\Orm\Relations\MorphMany;
+use FluentCart\Framework\Support\Arr;
+use FluentCart\App\Services\Renderer\Receipt\TaxSummaryHelper;
+use FluentCartPro\App\Modules\Licensing\Models\License;
+
+/**
+ *  Order Model - DB Model for Orders
+ *
+ *  Database Model
+ *
+ * @package FluentCart\App\Models
+ *
+ * @version 1.0.0
+ */
+class Order extends Model
+{
+    use CanSearch, HasActivity, CanUpdateBatch;
+
+    protected $table = 'fct_orders';
+
+    public static function boot()
+    {
+        parent::boot();
+        static::creating(function ($model) {
+            if (empty($model->uuid)) {
+                $model->uuid = static::generateOrderUuid();
+            }
+
+            if (!isset($model->config)) {
+                $model->config = [];
+            }
+
+            // Every order carries a currency snapshot (config.fx + rate).
+            // dev-docs/multi-currency/06-orders-subscriptions.md.
+            CurrencySnapshot::applyToNewOrder($model);
+
+            if ($model->payment_status === 'paid' || apply_filters('fluent_cart/create_receipt_number_on_order_create', false)) {
+                $model->receipt_number = OrderService::getNextReceiptNumber();
+                $model->invoice_no = OrderService::getInvoicePrefix() . $model->receipt_number;
+            }
+        });
+
+        static::created(function ($model) {
+            // Every order carries a companion operations row. ReceiptHandler reads
+            // sales_recorded off it to decide whether a receipt is being seen for the
+            // first time, and that gates fluent_cart/after_receipt_first_time — an order
+            // without the row silently never fires its purchase event.
+            //
+            // Created here rather than at each call site because orders also come from
+            // renewals, subscription child orders, the admin and WP-CLI, none of which
+            // pass through the checkout or dispatch fluent_cart/order_created.
+            OrderOperation::query()->firstOrCreate(['order_id' => $model->id]);
+
+            if ($model->invoice_no) {
+                do_action('fluent_cart/order/invoice_number_added', [
+                    'order' => $model
+                ]);
+            }
+        });
+    }
+
+    /**
+     * Generate a short, human-usable order handle: 12 uppercase alphanumeric
+     * characters (e.g. A7K2P9X4M1Q8), stored in the `uuid` column and shown as
+     * "#A7K2P9X4M1Q8" on the UI. Existing orders keep their legacy md5 uuids.
+     *
+     * Uniqueness is best-effort at the application level: a chunk of
+     * candidates is generated and filtered against the table with a single
+     * whereIn query (no per-candidate round-trips). There is intentionally no
+     * DB unique constraint on `fct_orders.uuid`, so this check is NOT atomic —
+     * two concurrent inserts could theoretically race on the same candidate.
+     * Given the 36^12 (~4.7x10^18) space, a real collision is astronomically
+     * unlikely, but not cryptographically guaranteed. If a hard guarantee is
+     * ever required, add a unique index on the column and retry creation on a
+     * duplicate-key error.
+     *
+     * @return string
+     */
+    public static function generateOrderUuid()
+    {
+        $chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+        $maxIndex = strlen($chars) - 1;
+        $chunkSize = 20;
+
+        do {
+            // Generate a chunk of candidates, then resolve collisions with a
+            // single query (whereIn) instead of one query per candidate. The
+            // code is used as the array key so the chunk is self-deduplicated.
+            $candidates = [];
+            for ($i = 0; $i < $chunkSize; $i++) {
+                $code = '';
+                for ($j = 0; $j < 12; $j++) {
+                    $code .= $chars[wp_rand(0, $maxIndex)];
+                }
+                $candidates[$code] = true;
+            }
+
+            $taken = static::whereIn('uuid', array_keys($candidates))
+                ->get(['uuid'])
+                ->pluck('uuid')
+                ->toArray();
+
+            foreach ($taken as $existing) {
+                unset($candidates[$existing]);
+            }
+            // Loops again only if every candidate in the chunk collided, which
+            // is astronomically unlikely for a 36^12 (~4.7x10^18) space.
+        } while (empty($candidates));
+
+        return array_key_first($candidates);
+    }
+
+    protected $fillable = [
+        'status',
+        'parent_id',
+        'invoice_no',
+        'receipt_number',
+        'fulfillment_type',
+        'type',
+        'customer_id',
+        'payment_method',
+        'payment_method_title',
+        'payment_status',
+        'currency',
+        'subtotal',
+        'discount_tax',
+        'manual_discount_total',
+        'coupon_discount_total',
+        'shipping_tax',
+        'shipping_total',
+        'fee_total',
+        'tax_total',
+        'tax_behavior',
+        'total_amount',
+        'rate',
+        'note',
+        'ip_address',
+        'completed_at',
+        'refunded_at',
+        'total_refund',
+        'uuid',
+        'created_at',
+        'refunded_at',
+        'total_paid',
+        'mode',
+        'shipping_status',
+        'config'
+    ];
+
+    protected $searchable = [
+        'id',
+        'total_amount',
+        'status',
+        'payment_method',
+        'payment_status',
+        'created_at',
+        'updated_at',
+    ];
+
+    protected $casts = [
+        'subtotal'              => 'double',
+        'discount_tax'          => 'double',
+        'manual_discount_total' => 'double',
+        'coupon_discount_total' => 'double',
+        'shipping_tax'          => 'double',
+        'shipping_total'        => 'double',
+        'fee_total'             => 'double',
+        'tax_total'             => 'double',
+        'tax_behavior'          => 'integer',
+        'total_amount'          => 'double',
+        'customer_id'           => 'integer',
+    ];
+
+    public function parentOrder(): BelongsTo
+    {
+        return $this->belongsTo(Order::class, 'parent_id', 'id');
+    }
+
+    public function children(): HasMany
+    {
+        return $this->hasMany(Order::class, 'parent_id', 'id');
+    }
+
+    public function transactions(): HasMany
+    {
+        return $this->hasMany(OrderTransaction::class, 'order_id', 'id');
+    }
+
+    public function subscriptions(): HasMany
+    {
+        return $this->hasMany(Subscription::class, 'parent_order_id', 'id');
+    }
+
+    public function order_items(): HasMany
+    {
+        return $this->hasMany(OrderItem::class, 'order_id', 'id');
+    }
+
+    public function shipments(): HasMany
+    {
+        return $this->hasMany(Shipment::class, 'order_id', 'id');
+    }
+
+    /**
+     * Get only product order items (excludes fees, signup fees, and other non-product items).
+     * Use this in all display contexts where product line items are shown.
+     *
+     * @return \FluentCart\Framework\Support\Collection
+     */
+    public function getProductItems()
+    {
+        return $this->order_items()->whereNotIn('payment_type', ['fee', 'signup_fee'])->get();
+    }
+
+    /**
+     * Get fee order items for this order.
+     *
+     * @return HasMany
+     */
+    public function feeItems(): HasMany
+    {
+        return $this->order_items()->where('payment_type', 'fee');
+    }
+
+    /**
+     * Get applied fees as a simple array (for display purposes).
+     *
+     * @return array
+     */
+    public function getAppliedFees(): array
+    {
+        return $this->feeItems()->get()->map(function ($item) {
+            $otherInfo = is_array($item->other_info) ? $item->other_info : [];
+            return [
+                'key'     => Arr::get($otherInfo, 'fee_key', ''),
+                'label'   => $item->title,
+                'amount'  => (int) $item->subtotal,
+                'source'  => Arr::get($otherInfo, 'source', 'custom'),
+                'item_id' => $item->id,
+            ];
+        })->toArray();
+    }
+
+    public function setConfigAttribute($value)
+    {
+
+        if ($value) {
+            $decoded = \json_encode($value, true);
+            if (!($decoded)) {
+                $decoded = '[]';
+            }
+        } else {
+            $decoded = '[]';
+        }
+
+        $this->attributes['config'] = $decoded;
+    }
+
+    public function getConfigAttribute($value)
+    {
+        if (!$value) {
+            return [];
+        }
+
+        return \json_decode($value, true);
+    }
+
+    /**
+     * Retrieves a filtered list of `order_items` based on priority rules for `payment_type`.
+     *
+     * The function applies the following logic in descending order of precedence:
+     *
+     * 1. **Priority 1: Onetime Items**
+     *    - If `order_items` contain `payment_type` as `onetime`, return only those items.
+     *
+     * 2. **Priority 2: Subscription Items**
+     *    - If there are no `onetime` items, return `subscription` items only if:
+     *      - There is no `signup_fee` or `adjustment` for the same order.
+     *    - This ensures `subscription` items are returned only when no other higher priority types are present.
+     *
+     * 3. **Priority 3: Adjustment Items**
+     *    - If there are no `onetime` or `subscription` items, return `adjustment` items only if:
+     *      - `subscription` items exist for the same order.
+     *    - This prioritizes `adjustment` items when both `adjustment` and `subscription` are present.
+     *
+     * The function uses `whereExists` and `whereNotExists` subqueries to apply these priority rules.
+     * - `whereExists` checks for the presence of certain `payment_type` values in the `order_items` table.
+     * - `whereNotExists` ensures exclusion of specific `payment_type` values if higher priority types are present.
+     *
+     * @return HasMany
+     *      The filtered `order_items` relationship, ordered by the specified priority rules.
+     */
+
+    public function filteredOrderItems(): HasMany
+    {
+        return $this->hasMany(OrderItem::class, 'order_id', 'id');
+    }
+
+    public function customer(): BelongsTo
+    {
+        return $this->belongsTo(Customer::class, 'customer_id', 'id');
+    }
+
+    public function orderMeta(): HasMany
+    {
+        return $this->hasMany(OrderMeta::class, 'order_id', 'id');
+    }
+
+    public function orderTaxRates(): HasMany
+    {
+        return $this->hasMany(OrderTaxRate::class, 'order_id', 'id');
+    }
+
+
+    public function appliedCoupons(): HasMany
+    {
+        return $this->hasMany(AppliedCoupon::class, 'order_id', 'id');
+    }
+
+    public function usedCoupons(): HasManyThrough
+    {
+
+        return $this->hasManyThrough(
+            Coupon::class,         // Final model
+            AppliedCoupon::class,  // Intermediate model
+            'order_id',            // Foreign key on applied_coupons table
+            'id',                  // Foreign key on coupons table
+            'id',                  // Local key on orders table
+            'coupon_id'            // Local key on applied_coupons table
+        );
+    }
+
+    public function shipping_address(): HasOne
+    {
+        return $this->hasOne(OrderAddress::class, 'order_id', 'id')->where('type', 'shipping');
+    }
+
+    public function billing_address(): HasOne
+    {
+        return $this->hasOne(OrderAddress::class, 'order_id', 'id')->where('type', 'billing');
+    }
+
+    public function order_addresses(): HasMany
+    {
+        return $this->hasMany(OrderAddress::class, 'order_id', 'id');
+    }
+
+    public function licenses(): HasMany
+    {
+        return $this->hasMany(License::class, 'order_id', 'id');
+    }
+
+    public function scopeSearchBy($query, $search)
+    {
+        $search = trim($search);
+
+        if (!$search) {
+            return $query;
+        }
+
+        $searchTerms = explode(' ', $search);
+
+        return $query->where(function (Builder $q) use ($searchTerms) {
+            $q->where('id', 'LIKE', "%{$searchTerms[0]}%")
+                ->orWhere('status', 'LIKE', "%{$searchTerms[0]}%")
+                ->when(is_numeric($searchTerms[0]), function ($q) use ($searchTerms) {
+                    $q->orWhere('total_amount', Helper::toCent($searchTerms[0]));
+                })
+                //->orWhere('total_amount', Helper::toCent($searchTerms[0]))
+                ->orWhere('payment_status', 'LIKE', "%{$searchTerms[0]}%")
+                ->orWhere('payment_method', 'LIKE', "%{$searchTerms[0]}%")
+                ->orWhere('invoice_no', 'LIKE', "%{$searchTerms[0]}%")
+                ->orWhereHas('order_items', function ($orderItemQuery) use ($searchTerms) {
+                    $orderItemQuery->where('post_title', 'LIKE', "%{$searchTerms[0]}%")
+                        ->orWhere('title', 'LIKE', "%{$searchTerms[0]}%");
+                })
+                ->orWhereHas('customer', function ($customerQuery) use ($searchTerms) {
+                    foreach ($searchTerms as $term) {
+                        $customerQuery->where(function ($q) use ($term) {
+                            $q->where('email', 'LIKE', "%{$term}%")
+                                ->orWhere('first_name', 'LIKE', "%{$term}%")
+                                ->orWhere('last_name', 'LIKE', "%{$term}%");
+                        });
+                    }
+                });
+        });
+    }
+
+    public function scopeOfPaymentStatus($query, $status)
+    {
+        return $query->where('payment_status', $status);
+    }
+
+    public function scopeOfOrderStatus($query, $status)
+    {
+        return $query->where('status', $status);
+    }
+
+    public function scopeOfShippingStatus($query, $status)
+    {
+        return $query->where('shipping_status', $status);
+    }
+
+    public function scopeOfOrderType($query, $type)
+    {
+        return $query->where('order_type', $type);
+    }
+
+    public function scopeOfPaymentMethod($query, $methodName)
+    {
+        return $query->where('payment_method', $methodName);
+    }
+
+    public function scopeApplyCustomFilters($query, $filters)
+    {
+        $acceptedKeys = $this->fillable;
+        foreach ($filters as $filterKey => $filterValues) {
+            $values = Arr::get($filterValues, 'value', []);
+            if (!empty($values) && $filterKey && in_array($filterKey, $acceptedKeys)) {
+                $query->search([$filterKey => ["column" => $filterKey, "operator" => "in", "value" => $values]]);
+            }
+        }
+
+        return $query;
+    }
+
+    public function updateStatus($key, $newStatus)
+    {
+        $oldStatus = $this->$key;
+
+        if ($newStatus == $oldStatus) {
+            return $this;
+        }
+
+        if ($key === 'status' && $newStatus === Status::ORDER_COMPLETED) {
+            $this->completed_at = DateTime::gmtNow();
+        }
+
+        if ($key === 'payment_status' && $newStatus === Status::PAYMENT_REFUNDED) {
+            $this->refunded_at = DateTime::gmtNow();
+        }
+
+        $this->$key = $newStatus;
+        $this->save();
+
+        return $this;
+    }
+
+    public function updatePaymentStatus($newStatus)
+    {
+        $oldStatus = $this->payment_status;
+
+        if ($newStatus == $oldStatus) {
+            return $this;
+        }
+
+        if ($newStatus === Status::PAYMENT_REFUNDED) {
+            $this->refunded_at = DateTime::gmtNow();
+        }
+
+        $this->payment_status = $newStatus;
+        $this->save();
+
+//        do_action('fluent_cart/order_status_to_' . $newStatus, [
+//            'order' => $this,
+//            'new_status' => $newStatus,
+//            'old_status' => $oldStatus
+//        ]);
+//        do_action('fluent_cart/order_status_updated', [
+//            'order' => $this,
+//            'new_status' => $newStatus,
+//            'old_status' => $oldStatus
+//        ]);
+
+        return $this;
+    }
+
+    public function getMeta($metaKey, $defaultValue = false)
+    {
+        $meta = OrderMeta::query()->where('order_id', $this->id)
+            ->where('meta_key', $metaKey)
+            ->first();
+
+        if ($meta) {
+            return $meta->meta_value;
+        }
+
+        return $defaultValue;
+    }
+
+    public function updateMeta($metaKey, $value)
+    {
+        $meta = OrderMeta::query()->where('order_id', $this->id)
+            ->where('meta_key', $metaKey)
+            ->first();
+
+        if ($meta) {
+            $meta->meta_value = $value;
+            $meta->save();
+
+            return $meta;
+        }
+
+        return OrderMeta::create([
+            'order_id'   => $this->id,
+            //phpcs:ignore WordPress.DB.SlowDBQuery.slow_db_query_meta_key
+            'meta_key'   => $metaKey,
+            //phpcs:ignore WordPress.DB.SlowDBQuery.slow_db_query_meta_value
+            'meta_value' => $value,
+        ]);
+    }
+
+    public function deleteMeta($metaKey)
+    {
+        return OrderMeta::where('order_id', $this->id)
+            ->where('meta_key', $metaKey)
+            ->delete();
+    }
+
+    public function getBusinessInfo(): array
+    {
+        $businessInfo = $this->getMeta('business_info', []);
+
+        return is_array($businessInfo) ? $businessInfo : [];
+    }
+
+    /**
+     * Seller identity snapshotted at checkout. Fields missing from the
+     * snapshot (orders placed before it existed) come from live settings.
+     *
+     * @return array{company_name: string, legal_registration_id: string, seller_vat_id: string, seller_tax_id: string, store_country: string}
+     */
+    public function getStoreBusinessInfo(): array
+    {
+        $snapshot = $this->getMeta('store_business_info', []);
+        $snapshot = is_array($snapshot) ? $snapshot : [];
+        $storeSettings = null;
+        $info = [];
+
+        foreach (['company_name', 'legal_registration_id', 'seller_vat_id', 'seller_tax_id', 'store_country'] as $field) {
+            if (isset($snapshot[$field])) {
+                $info[$field] = (string) $snapshot[$field];
+                continue;
+            }
+            if (!$storeSettings) {
+                $storeSettings = new \FluentCart\Api\StoreSettings();
+            }
+            $info[$field] = (string) $storeSettings->get($field, '');
+        }
+
+        return $info;
+    }
+
+    public function getPrimaryOrderTaxRate()
+    {
+        return $this->orderTaxRates ? $this->orderTaxRates->first() : null;
+    }
+
+    public function getReversedTaxTotal()
+    {
+        $this->loadMissing(['orderTaxRates']);
+        $primaryRate = $this->getPrimaryOrderTaxRate();
+        if (!$primaryRate) {
+            return 0;
+        }
+        return (int) Arr::get(
+            is_array($primaryRate->meta) ? $primaryRate->meta : [],
+            'reverse_charge_original_tax_total',
+            0
+        );
+    }
+
+    public function isB2BOrder(): bool
+    {
+        return !empty($this->getBusinessInfo());
+    }
+
+    public function getIsB2BOrderAttribute(): bool
+    {
+        return $this->isB2BOrder();
+    }
+
+    public function isReverseChargeTaxOrder(): bool
+    {
+        $orderTaxRate = $this->getPrimaryOrderTaxRate();
+        $reverseChargeApplied = Arr::get($orderTaxRate->meta ?? [], 'reverse_charge_applied', null);
+
+        if ($reverseChargeApplied !== null) {
+            return (bool) $reverseChargeApplied;
+        }
+
+        return $this->hasValidatedCustomerTaxNumber() && ((int) $this->tax_total + (int) $this->shipping_tax) === 0;
+    }
+
+    public function getOrderRcMode(): string
+    {
+        $this->loadMissing(['orderTaxRates']);
+        $primaryRate = $this->getPrimaryOrderTaxRate();
+        $stored = Arr::get((array) ($primaryRate ? $primaryRate->meta : []), 'reverse_charge_price_mode', null);
+        if ($stored !== null) {
+            return (string) $stored;
+        }
+        return (string) Arr::get(
+            get_option('fluent_cart_tax_configuration_settings', []),
+            'eu_vat_settings.reverse_charge_price_mode',
+            'fixed'
+        );
+    }
+
+    public function getDisplayTaxLines(): array
+    {
+        $displayTaxLines = [];
+        $isReverseCharge = $this->isReverseChargeTaxOrder();
+
+        foreach ($this->orderTaxRates ?: [] as $orderTaxRate) {
+            $meta = $this->normalizeOrderTaxRateMeta((array) $orderTaxRate->meta, (int) $orderTaxRate->tax_rate_id);
+
+            $ratePercent   = (float) Arr::get($meta, 'rate_percent', 0);
+            $rateTaxAmount = (int) $orderTaxRate->order_tax;
+            $taxableAmount = (int) Arr::get($meta, 'taxable_amount', 0);
+            $isCompound    = (bool) Arr::get($meta, 'is_compound', false);
+            $isMixedInclusive = (bool) Arr::get($meta, 'is_mixed_inclusive', false);
+            $lineInclusive = Arr::get($meta, 'inclusive', null);
+            $label         = trim((string) Arr::get($meta, 'label', ''));
+
+            if ($isReverseCharge) {
+                if ($ratePercent <= 0) {
+                    continue;
+                }
+            } elseif ($rateTaxAmount <= 0) {
+                continue;
+            }
+
+            $displayLabel = $label ?: __('Tax', 'fluent-cart');
+
+            if ($ratePercent > 0) {
+                $displayLabel .= ' (' . Helper::formatTaxRatePercent($ratePercent) . '%)';
+            }
+
+            if ($isCompound) {
+                $displayLabel .= ' (' . __('Compound', 'fluent-cart') . ')';
+            }
+
+            // Capture clean label (name + percent, no base suffix) for the shared folded-row builder.
+            $rateLabelClean = $displayLabel;
+
+            if ($taxableAmount > 0 && !$isMixedInclusive) {
+                if ($lineInclusive === null) {
+                    $displayBase = $this->tax_behavior == 2
+                        ? max(0, $taxableAmount - $rateTaxAmount)
+                        : $taxableAmount;
+                } else {
+                    $displayBase = $lineInclusive
+                        ? max(0, $taxableAmount - $rateTaxAmount)
+                        : $taxableAmount;
+                }
+
+                // The order's own currency — admin (base) and the customer
+                // portal (visitor's currency) read this label too
+                $displayLabel .= ' ' . sprintf(
+                    /* translators: %1$s: formatted amount the tax is calculated on */
+                    _x('on %1$s', 'tax calculated on amount', 'fluent-cart'),
+                    html_entity_decode(Helper::toDecimal($displayBase, true, $this->currency ?: null), ENT_QUOTES, 'UTF-8')
+                );
+            }
+
+            $displayTaxLines[] = [
+                'label'          => $displayLabel,
+                'rate_label'     => $rateLabelClean,
+                'order_tax'      => $rateTaxAmount,
+                'total_tax'      => (int) $orderTaxRate->total_tax,
+                'rate_id'        => (int) $orderTaxRate->tax_rate_id,
+                'rate_percent'   => $ratePercent,
+                'taxable_amount' => isset($displayBase) ? (int) $displayBase : $taxableAmount,
+                'inclusive'      => $lineInclusive === null ? ((int) $this->tax_behavior === 2) : (bool) $lineInclusive,
+            ];
+            if (isset($displayBase)) {
+                // Net of this rate's tax, so the breakdown can use it without item data.
+                $displayTaxLines[count($displayTaxLines) - 1]['net_taxable_amount'] = (int) $displayBase;
+                $displayTaxLines[count($displayTaxLines) - 1]['currency'] = $this->currency;
+            }
+            unset($displayBase);
+        }
+
+        return $displayTaxLines;
+    }
+
+    public function getDisplayTaxLinesAttribute(): array
+    {
+        return $this->getDisplayTaxLines();
+    }
+
+    public function getDisplayShippingTaxLines(): array
+    {
+        $displayLines = [];
+        foreach ($this->orderTaxRates ?: [] as $orderTaxRate) {
+            $shippingTax = (int) $orderTaxRate->shipping_tax;
+            if ($shippingTax <= 0) {
+                continue;
+            }
+            $meta        = $this->normalizeOrderTaxRateMeta((array) $orderTaxRate->meta, (int) $orderTaxRate->tax_rate_id);
+            $ratePercent = (float) Arr::get($meta, 'rate_percent', 0);
+            $label       = trim((string) Arr::get($meta, 'label', ''));
+            $rateName    = $label ?: __('Tax', 'fluent-cart');
+            if ($ratePercent > 0) {
+                $formattedRatePercent = Helper::formatTaxRatePercent($ratePercent);
+                /* translators: %1$s: tax rate name e.g. "VAT", %2$s: rate percentage e.g. "19" */
+                $displayLabel = sprintf(__('%1$s (%2$s%%) on shipping', 'fluent-cart'), $rateName, $formattedRatePercent);
+            } else {
+                /* translators: %1$s: tax rate name e.g. "VAT" */
+                $displayLabel = sprintf(__('%1$s on shipping', 'fluent-cart'), $rateName);
+            }
+            $displayLine = [
+                'label'        => $displayLabel,
+                'shipping_tax' => $shippingTax,
+                'rate_id'      => (int) $orderTaxRate->tax_rate_id,
+                'rate_percent' => $ratePercent,
+            ];
+            if (isset($meta['shipping_taxable_amount'])) {
+                $displayLine['shipping_taxable_amount'] = (int) $meta['shipping_taxable_amount'];
+            }
+            $displayLines[] = $displayLine;
+        }
+        return $displayLines;
+    }
+
+    public function getDisplayShippingTaxLinesAttribute(): array
+    {
+        return $this->getDisplayShippingTaxLines();
+    }
+
+    protected function normalizeOrderTaxRateMeta(array $meta, int $taxRateId): array
+    {
+        if (
+            array_key_exists('label', $meta) ||
+            array_key_exists('rate_percent', $meta) ||
+            array_key_exists('taxable_amount', $meta) ||
+            array_key_exists('is_compound', $meta)
+        ) {
+            return $meta;
+        }
+
+        $legacyRates = (array) Arr::get($meta, 'rates', []);
+        if (!$legacyRates) {
+            return $meta;
+        }
+
+        $legacyRateMeta = [];
+
+        foreach ($legacyRates as $legacyRate) {
+            if ((int) Arr::get($legacyRate, 'rate_id', 0) === $taxRateId) {
+                $legacyRateMeta = (array) $legacyRate;
+                break;
+            }
+        }
+
+        if (!$legacyRateMeta) {
+            $legacyRateMeta = (array) reset($legacyRates);
+        }
+
+        if (!$legacyRateMeta) {
+            return $meta;
+        }
+
+        return array_merge($meta, [
+            'label'          => Arr::get($legacyRateMeta, 'label', ''),
+            'rate_percent'   => (float) Arr::get($legacyRateMeta, 'rate_percent', Arr::get($legacyRateMeta, 'rate', 0)),
+            'taxable_amount' => (int) Arr::get($legacyRateMeta, 'taxable_amount', 0),
+            'is_compound'    => (bool) Arr::get($legacyRateMeta, 'is_compound', false),
+            'inclusive'      => Arr::get($legacyRateMeta, 'inclusive', null),
+            'is_mixed_inclusive' => (bool) Arr::get($legacyRateMeta, 'is_mixed_inclusive', false),
+        ]);
+    }
+
+    public function getCustomerTaxNumber(): string
+    {
+        $businessInfoTaxNumber = (string) Arr::get($this->getBusinessInfo(), 'tax_number', '');
+        if (!empty($businessInfoTaxNumber)) {
+            return $businessInfoTaxNumber;
+        }
+
+        $legacyTaxNumber = (string) $this->getMeta('vat_tax_id', '');
+        if (!empty($legacyTaxNumber)) {
+            return $legacyTaxNumber;
+        }
+
+        $topLevelLegacyTaxId = (string) $this->getMeta('tax_id', '');
+        if (!empty($topLevelLegacyTaxId)) {
+            return $topLevelLegacyTaxId;
+        }
+
+        $orderTaxRate = $this->getPrimaryOrderTaxRate();
+
+        return (string) Arr::get($orderTaxRate->meta ?? [], 'vat_reverse.vat_number', '');
+    }
+
+    public function getTaxSummaryAttribute(): array
+    {
+        return TaxSummaryHelper::computeTaxSummary($this);
+    }
+
+    public function getBusinessInfoAttribute(): array
+    {
+        $businessInfo = $this->getBusinessInfo();
+
+        // Only meaningful for a MoR reverse-charge order (no orderTaxRate row) — omit
+        // for every normal order instead of appending a redundant duplicate of total_paid.
+        $morVatRemoved = $this->getMoRVatRemovedAmount();
+        if ($morVatRemoved > 0) {
+            $businessInfo['net_total_paid'] = $this->netAmount((int) $this->total_paid);
+        }
+
+        return $businessInfo;
+    }
+
+    public function getIsReverseChargeTaxOrderAttribute(): bool
+    {
+        return $this->isReverseChargeTaxOrder();
+    }
+
+    public function getCustomerTaxNumberAttribute(): string
+    {
+        return $this->getCustomerTaxNumber();
+    }
+
+    public function hasValidatedCustomerTaxNumber(): bool
+    {
+        $businessInfo = $this->getBusinessInfo();
+        if (!empty($businessInfo['tax_number'])) {
+            return (bool) Arr::get($businessInfo, 'tax_number_validated', false);
+        }
+
+        $orderTaxRate = $this->getPrimaryOrderTaxRate();
+
+        return (bool) Arr::get($orderTaxRate->meta ?? [], 'vat_reverse.valid', false);
+    }
+
+    public function getCustomerTaxName(): string
+    {
+        $businessInfoTaxName = (string) Arr::get($this->getBusinessInfo(), 'tax_number_name', '');
+        if (!empty($businessInfoTaxName)) {
+            return $businessInfoTaxName;
+        }
+
+        $orderTaxRate = $this->getPrimaryOrderTaxRate();
+
+        return (string) Arr::get($orderTaxRate->meta ?? [], 'vat_reverse.name', '');
+    }
+
+    public function getTotalPaidAmount()
+    {
+        return $this->transactions()->where('status', Status::TRANSACTION_SUCCEEDED)->sum('total');
+    }
+
+    /**
+     * Amount of VAT removed by a merchant-of-record gateway (e.g. Paddle) for a
+     * reverse-charge order that never ran the tax module (no `fct_order_tax_rate` row).
+     * Display-only — `total_amount`/`total_paid`/`txn.total` stay gross for such orders
+     * (cover invariant: the "fully paid" equality that drives due-amount checks, digital
+     * auto-complete, and dunning reminders depends on it), so this is never subtracted
+     * into the ledger, only into `getDisplayTotalPaid()` for the admin UI. Zero for
+     * core-handled reverse charge (tax-rate row present) — those are already net at
+     * creation time.
+     */
+    public function getMoRVatRemovedAmount(): int
+    {
+        if ($this->getPrimaryOrderTaxRate()) {
+            return 0;
+        }
+
+        return (int) Arr::get($this->getBusinessInfo(), 'mor_vat_removed', 0);
+    }
+
+    /**
+     * Nets a raw gross ledger figure (total_paid, a live paid-total sum, a refund amount)
+     * by the MoR VAT removal — see getMoRVatRemovedAmount(). Single formula for every
+     * "what did we actually collect/need to refund" comparison, so callers never
+     * reimplement the subtraction themselves. Never use for due-amount, digital
+     * auto-complete, or reminder logic; those must keep comparing the gross ledger
+     * columns (total_amount vs total_paid) so the "fully paid" equality still holds.
+     */
+    public function netAmount(int $amount): int
+    {
+        return max(0, $amount - $this->getMoRVatRemovedAmount());
+    }
+
+    /**
+     * What the customer paid for shipping: shipping_total, plus shipping_tax when it was added on top.
+     */
+    public function shippingChargedTotal(): int
+    {
+        if (TaxSummaryHelper::isShippingTaxInclusive($this)) {
+            return (int) $this->shipping_total;
+        }
+
+        return (int) $this->shipping_total + (int) $this->shipping_tax;
+    }
+
+    public function getTotalRefundAmount()
+    {
+        return $this->transactions()
+            ->where('status', Status::TRANSACTION_REFUNDED)
+            ->get()
+            ->filter(function ($transaction) {
+                return !$transaction->isAwaitingResync();
+            })
+            ->sum('total');
+    }
+
+    public function recountTotalPaidAndRefund()
+    {
+        $totalPaid = $this->getTotalPaidAmount();
+        $totalRefunded = $this->getTotalRefundAmount();
+
+        $this->total_refund = $totalRefunded;
+
+        // Net out MoR VAT removal so a full refund of the actually captured amount
+        // resolves to "fully refunded" — see netAmount().
+        $netTotalPaid = $this->netAmount($totalPaid);
+
+        if (floatval($totalRefunded) >= floatval($netTotalPaid)) {
+            $this->payment_status = Status::PAYMENT_REFUNDED;
+        } elseif ($totalPaid > $totalRefunded) {
+            $this->payment_status = Status::PAYMENT_PARTIALLY_REFUNDED;
+        }
+
+        $this->save();
+
+        return $this;
+    }
+
+    public function syncOrderAfterRefund($type, $refundedAmount)
+    {
+        $paymentStatus = $type == 'full' ? Status::PAYMENT_REFUNDED : Status::PAYMENT_PARTIALLY_REFUNDED;
+        $this->total_refund += $refundedAmount;
+        $this->payment_status = $paymentStatus;
+
+        if ($paymentStatus === Status::PAYMENT_REFUNDED && !$this->refunded_at) {
+            $this->refunded_at = DateTime::gmtNow();
+        }
+
+        $this->save();
+
+        return $this;
+    }
+
+    /**
+     * Spread an amount refund over the given lines (all lines when none are given), weighted by what is
+     * left of each line's charge, and record it in refund_total.
+     *
+     * @param int[] $refundedItemIds order item ids
+     * @param int   $refundedAmount  cents
+     *
+     * @return int cents no line had room for
+     */
+    public function updateRefundedItems($refundedItemIds, $refundedAmount)
+    {
+        $query = OrderItem::query()->where('order_id', $this->id);
+        if ($refundedItemIds) {
+            $query->whereIn('id', $refundedItemIds);
+        }
+
+        /** @var OrderItem[] $orderItems */
+        $orderItems = $query->get();
+
+        $remaining = [];
+        foreach ($orderItems as $orderItem) {
+            $left = $orderItem->chargedTotal($this) - (int) $orderItem->refund_total;
+            if ($left > 0) {
+                $remaining[$orderItem->id] = $left;
+            }
+        }
+
+        $totalRemain = array_sum($remaining);
+        $overflow = max(0, (int) $refundedAmount - $totalRemain);
+        if ($totalRemain <= 0) {
+            return $overflow;
+        }
+
+        // Largest remainder: floored shares never exceed a line's remaining, so +1 cent still fits.
+        $refundedAmount = min((int) $refundedAmount, $totalRemain);
+        $amounts = [];
+        $fractions = [];
+        foreach ($remaining as $itemId => $left) {
+            $amounts[$itemId] = intdiv($refundedAmount * $left, $totalRemain);
+            $fractions[$itemId] = ($refundedAmount * $left) % $totalRemain;
+        }
+
+        arsort($fractions);
+        $leftover = $refundedAmount - array_sum($amounts);
+        foreach (array_slice(array_keys($fractions), 0, $leftover) as $itemId) {
+            $amounts[$itemId]++;
+        }
+
+        $this->addItemRefunds($amounts);
+
+        return $overflow;
+    }
+
+    /**
+     * Count the part of an amount refund that no line had room for as a shipping refund. Only when the
+     * lines and shipping make up the whole order total, so another order-level charge is never called shipping.
+     *
+     * @param int $amount cents
+     */
+    public function addRefundOverflowToShipping(int $amount)
+    {
+        if ($amount <= 0) {
+            return;
+        }
+
+        $shippingCharged = $this->shippingChargedTotal();
+        $linesCharged = 0;
+        foreach (OrderItem::query()->where('order_id', $this->id)->get() as $orderItem) {
+            /** @var OrderItem $orderItem */
+            $linesCharged += $orderItem->chargedTotal($this);
+        }
+
+        if ($linesCharged + $shippingCharged !== (int) $this->total_amount) {
+            return;
+        }
+
+        $this->addShippingRefund(min($amount, $shippingCharged - (int) $this->getMeta('shipping_refunded_amount')));
+    }
+
+    /**
+     * Add to the refunded shipping, and flag shipping refunded once it covers what was charged.
+     *
+     * @param int $amount cents
+     */
+    public function addShippingRefund(int $amount)
+    {
+        if ($amount <= 0) {
+            return;
+        }
+
+        $refunded = (int) $this->getMeta('shipping_refunded_amount') + $amount;
+        $this->updateMeta('shipping_refunded_amount', $refunded);
+        if ($refunded >= $this->shippingChargedTotal()) {
+            $this->updateMeta('shipping_refunded', '1');
+        }
+    }
+
+    /**
+     * Add refunded amounts to the lines' refund_total, each capped at what is left of the line's charge.
+     *
+     * @param array<int, int> $amountByItemId order item id => cents
+     */
+    public function addItemRefunds(array $amountByItemId)
+    {
+        if (!$amountByItemId) {
+            return;
+        }
+
+        $orderItems = OrderItem::query()
+            ->where('order_id', $this->id)
+            ->whereIn('id', array_keys($amountByItemId))
+            ->get();
+
+        // The cap is applied inside the UPDATE so a concurrent refund on the same line cannot push it past the charge.
+        foreach ($orderItems as $orderItem) {
+            $amount = (int) $amountByItemId[$orderItem->id];
+            if ($amount <= 0) {
+                continue;
+            }
+
+            OrderItem::query()->where('id', $orderItem->id)->update([
+                'refund_total' => App::db()->raw(sprintf(
+                    'GREATEST(refund_total, LEAST(refund_total + %d, %d))',
+                    $amount,
+                    $orderItem->chargedTotal($this)
+                )),
+            ]);
+        }
+    }
+
+    public function recountTotalPaid()
+    {
+        $successStatuses = Status::getTransactionSuccessStatuses();
+
+        $totalPaid = $this->transactions()
+            ->whereIn('status', $successStatuses)
+            ->sum('total');
+
+        // total_paid stays gross: refunds live in total_refund and reports subtract them.
+        $this->total_paid = (int) apply_filters(
+            'fluentcart_order_transaction_paid_total',
+            (int) $totalPaid,
+            $this,
+            $successStatuses
+        );
+        $this->save();
+        return $this;
+    }
+
+    /**
+     * Get the order's label.
+     */
+    public function labels(): MorphMany
+    {
+        return $this->morphMany(LabelRelationship::class, 'labelable');
+    }
+
+    public function getLatestTransactionAttribute()
+    {
+        return OrderTransaction::query()->where('order_id', $this->id)
+            ->where('transaction_type', '!=', Status::TRANSACTION_TYPE_REFUND)
+            ->where('status', '!=', Status::TRANSACTION_REFUNDED)
+            ->orderBy('id', 'DESC')
+            ->first();
+    }
+
+    public function renewals(): HasMany
+    {
+        return $this
+            ->hasMany(Order::class, 'parent_id', 'id')
+            ->where('type', 'renewal')
+            ->wherenotIn('status', [
+                Status::ORDER_CANCELED,
+                Status::ORDER_FAILED,
+                Status::ORDER_ON_HOLD
+            ]);
+    }
+
+    public function isSubscription(): bool
+    {
+        return $this->order_items->where('payment_type', 'subscription')->count() > 0;
+    }
+
+
+    public function getViewUrl($type = 'customer')
+    {
+
+        if ($type === 'admin') {
+            return URL::getDashboardUrl('orders/' . $this->id . '/view');
+        }
+
+        return TemplateService::getCustomerProfileUrl('order/' . $this->uuid);
+    }
+
+    public function getLatestTransaction()
+    {
+        return OrderTransaction::query()
+            ->where('order_id', $this->id)
+            ->where('transaction_type', '!=', Status::TRANSACTION_TYPE_REFUND)
+            ->orderBy('id', 'DESC')
+            ->first();
+    }
+
+    public function currentSubscription(): ?Subscription
+    {
+        return Subscription::query()
+            ->where('parent_order_id', $this->id)
+            ->where('status', 'active')
+            ->orderBy('id', 'DESC')
+            ->first();
+    }
+
+    public function getDownloads($scope = 'email'): array
+    {
+        if (!in_array($this->status, Status::getOrderSuccessStatuses())) {
+            return [];
+        }
+
+        $order = $this->load('order_items');
+
+        if ($order->order_items->isEmpty()) {
+            return [];
+        }
+
+        $productIds = $order->order_items->pluck('post_id')->unique()->values();
+        $productDownloads = ProductDownload::query()->whereIn('post_id', $productIds)->get()->keyBy('id');
+
+        $groupedDownload = $productDownloads->groupBy('post_id');
+
+        $downloadData = [];
+
+        $alreadyAdded = [];
+
+        foreach ($order->order_items as $item) {
+            if (in_array($item->payment_type, ['signup_fee', 'fee'])) {
+                continue;
+            }
+
+            $availableDownloads = Arr::get($groupedDownload, $item->post_id, []);
+
+            $authorizedDownloads = [];
+
+            foreach ($availableDownloads as $download) {
+
+                $ids = $download->product_variation_id;
+
+                if (in_array($download->id, $alreadyAdded)) {
+                    continue;
+                }
+                if (!is_array($ids) || empty($ids) || in_array($item->object_id, $ids)) {
+                    
+                    $authorizedDownloads [] =
+                        [
+                            'download_url'        => Helper::generateDownloadFileLink($download, $order->id),
+                            'title'               => $download->title,
+                            'file_size'           => $download->file_size,
+                            'formatted_file_size' => Helper::readableFileSize($download->file_size),
+                        ];
+
+                    $alreadyAdded[] = $download->id;
+                }
+            }
+
+            if (!empty($authorizedDownloads)) {
+                $downloadData[] = [
+                    'title'           => $item->post_title . ' - ' . $item->title, // 'product name - variation title',
+                    'product_id'      => $item->post_id,
+                    'variation_id'    => $item->object_id,
+                    'additional_html' => '',
+                    'downloads'       => $authorizedDownloads
+                ];
+            }
+        }
+
+
+        return apply_filters('fluent_cart/single_order_downloads', $downloadData, [
+            'order' => $order,
+            'scope' => $scope
+        ]);
+    }
+
+    public function getLicenses($with = ['product','productVariant'])
+    {
+        if (!ModuleSettings::isActive('license') || !App::isProActive()) {
+            return null;
+        }
+
+        return License::query()->where('order_id', $this->id)
+            ->with($with)
+            ->get();
+    }
+
+    public function getDownloadsById($orderId): array
+    {
+        if (empty($orderId)) {
+            return [];
+        }
+
+        $order = Order::query()->with('order_items')->find($orderId);
+
+        if (empty($order)) {
+            return [];
+        }
+
+        return $order->getDownloads();
+    }
+
+    public function getReceiptViewUrl()
+    {
+        return add_query_arg([
+            'fluent-cart' => 'receipt',
+            'order_hash'  => $this->uuid,
+        ], home_url());
+    }
+
+    public function getReceiptDownloadUrl()
+    {
+        return add_query_arg(['download' => 1], $this->getReceiptViewUrl());
+    }
+
+    /**
+     * The public "review your order" page for this order.
+     *
+     * Same shape as the receipt URL, and the same credential: the order uuid.
+     * That is what lets the link work in an email to a guest-checkout buyer,
+     * who has no account to log into — see
+     * ProductReviewService::resolveOrderGrant().
+     *
+     * @return string
+     */
+    public function getOrderReviewUrl()
+    {
+        return static::reviewUrlForHash((string) $this->uuid);
+    }
+
+    /**
+     * The order-review URL for an order hash, without loading the order —
+     * the email parsers already hold the hash.
+     *
+     * @param string $orderHash
+     * @return string
+     */
+    public static function reviewUrlForHash($orderHash)
+    {
+        // The store's chosen page wins when it has one: it carries the theme's
+        // header, footer and styling, which the query route deliberately does
+        // not. getOrderReviewPage() returns home_url() when nothing is picked,
+        // which is exactly when the route should answer instead.
+        $storeSettings = new \FluentCart\Api\StoreSettings();
+        $pageUrl = $storeSettings->getOrderReviewPage();
+
+        if ($pageUrl && $pageUrl !== home_url()) {
+            return add_query_arg(['order_hash' => $orderHash], $pageUrl);
+        }
+
+        return add_query_arg([
+            'fluent-cart' => 'order-review',
+            'order_hash'  => $orderHash,
+        ], home_url());
+    }
+
+    public function addLog($title, $description = '', $type = 'info', $by = '')
+    {
+
+        fluent_cart_add_log(
+            $title,
+            $description,
+            $type,
+            [
+                'module_type' => 'FluentCart\App\Models\Order',
+                'module_id'   => $this->id,
+                'module_name' => 'Order',
+                'created_by'  => $by
+            ]
+        );
+    }
+
+    public function canBeRefunded(): bool
+    {
+        $config = $this->config;
+        $upgradeTo = Arr::get($config, 'upgraded_to', 0);
+        if (!empty($upgradeTo)) {
+            return false;
+        }
+        return true;
+    }
+
+    public function generateReceiptNumber()
+    {
+        if ($this->receipt_number) {
+            return $this;
+        }
+
+        // Re-check from database — another process may have already generated the number
+        $fresh = static::query()
+            ->where('id', $this->id)
+            ->select(['id', 'receipt_number', 'invoice_no'])
+            ->first();
+
+        if ($fresh && $fresh->receipt_number) {
+            $this->receipt_number = $fresh->receipt_number;
+            $this->invoice_no = $fresh->invoice_no;
+            return $this;
+        }
+
+        // Note: if a concurrent request wins the claim below, this number goes unused
+        // and creates a gap in the receipt sequence. Gaps are acceptable — correctness
+        // (no duplicates) is the priority, and the primary guard in StatusHelper
+        // prevents this race path from being reached in normal operation.
+        $receiptNumber = OrderService::getNextReceiptNumber();
+        $invoiceNo = OrderService::getInvoicePrefix() . $receiptNumber;
+
+        // Atomic: only set receipt_number if still NULL in the database.
+        // Prevents duplicate receipt numbers when concurrent requests
+        // (webhook + browser confirmation) race to generate one.
+        // invoice_no defaults to '' (empty string) in the schema, not NULL,
+        // so we must match both NULL and '' to correctly identify unset invoices.
+        $claimed = static::query()
+            ->where('id', $this->id)
+            ->whereNull('receipt_number')
+            ->where(function ($q) {
+                $q->whereNull('invoice_no')->orWhere('invoice_no', '');
+            })
+            ->update([
+                'receipt_number' => $receiptNumber,
+                'invoice_no'    => $invoiceNo,
+            ]);
+
+        if ($claimed) {
+            $this->receipt_number = $receiptNumber;
+            $this->invoice_no = $invoiceNo;
+
+            do_action('fluent_cart/order/invoice_number_added', [
+                'order' => $this
+            ]);
+        } else {
+            // Another process already generated it — use theirs
+            $fresh = static::query()
+                ->where('id', $this->id)
+                ->select(['id', 'receipt_number', 'invoice_no'])
+                ->first();
+
+            if ($fresh && $fresh->receipt_number) {
+                $this->receipt_number = $fresh->receipt_number;
+                $this->invoice_no = $fresh->invoice_no;
+            }
+        }
+
+        return $this;
+    }
+
+    public function orderOperation(): HasOne
+    {
+        return $this->hasOne(OrderOperation::class, 'order_id', 'id');
+    }
+
+    public function canBeDeleted()
+    {
+        $canBeDeleted = true;
+
+
+        if($this->mode !== Status::ORDER_MODE_TEST){
+            // Only canceled or on-hold orders can be deleted
+            if ($this->status === Status::ORDER_CANCELED || $this->status === Status::ORDER_ON_HOLD) {
+
+                $isFreeOrder = ((int)$this->total_amount) === 0;
+                $isPaidOrder = in_array($this->payment_status, Status::getOrderPaymentSuccessStatuses(), true);
+
+                // Free orders OR canceled unpaid orders can be deleted
+                if ($isPaidOrder && !$isFreeOrder) {
+                    $canBeDeleted = new \WP_Error(
+                        'order_cannot_be_deleted',
+                        sprintf(
+                        /* translators: 1: order/invoice number, 2: payment status */
+                            __('Order %1$s cannot be deleted due to its current payment status: %2$s.', 'fluent-cart'),
+                            $this->invoice_no,
+                            $this->payment_status
+                        )
+                    );
+                }
+
+            } else {
+                $canBeDeleted = new \WP_Error(
+                    'order_cannot_be_deleted',
+                    sprintf(
+                    /* translators: 1: order/invoice number, 2: order status */
+                        __('Order %1$s cannot be deleted due to its current order status: %2$s.', 'fluent-cart'),
+                        $this->invoice_no,
+                        $this->status
+                    )
+                );
+            }
+        }
+
+
+
+        if (!is_wp_error($canBeDeleted) && $this->mode !== Status::ORDER_MODE_TEST) {
+            // Handle subscription relationship
+            $parentOrderId = $this->parent_id ? $this->parent_id : $this->id;
+
+            $subscription = Subscription::query()
+                ->where('parent_order_id', $parentOrderId)
+                ->first();
+
+            // If subscription is active, prevent deletion
+            if (
+                $subscription &&
+                $subscription->status === Status::SUBSCRIPTION_ACTIVE &&
+                $this->type === 'subscription'
+            ) {
+                $canBeDeleted = new \WP_Error(
+                    'order_cannot_be_deleted',
+                    sprintf(
+                        /* translators: %s is the order/invoice number */
+                        __('Order %s cannot be deleted as it has an active subscription.', 'fluent-cart'),
+                        $this->invoice_no
+                    )
+                );
+            }
+        }
+
+
+        return apply_filters('fluent_cart/order_can_be_deleted', $canBeDeleted, [
+            'order' => $this
+        ]);
+    }
+
+
+}

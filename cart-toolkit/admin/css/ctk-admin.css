@@ -1,0 +1,1893 @@
+/**
+ * Cart Toolkit admin.
+ *
+ * Everything is scoped to .ctk-admin, the wrapper CTK_Admin::render_page()
+ * prints, so nothing here reaches other WordPress screens. It restyles the
+ * WordPress classes the views already use (.card, .form-table, .widefat,
+ * .button, .notice, .description) rather than asking every view to change.
+ */
+
+.ctk-admin {
+	--ctk-ink: #111827;
+	--ctk-ink-2: #374151;
+	--ctk-muted: #5f6673;
+	--ctk-line: #e4e7ec;
+	--ctk-line-soft: #f0f1f4;
+	--ctk-line-strong: #d0d5dd;
+	--ctk-surface: #ffffff;
+	--ctk-sunken: #f9fafb;
+	--ctk-hover: #ebedf1;
+	--ctk-accent: #2d5be3;
+	--ctk-accent-ink: #1e44b8;
+	--ctk-accent-soft: #eef2fd;
+	--ctk-on: #157f3c;
+	--ctk-on-dot: #1f9d55;
+	--ctk-on-soft: #e7f6ec;
+	--ctk-on-line: #9fd5b1;
+	--ctk-off-dot: #c4c9d2;
+	--ctk-off-soft: #eef0f3;
+	--ctk-warn: #8a5200;
+	--ctk-warn-soft: #fff8eb;
+	--ctk-warn-line: #f6e2b8;
+	--ctk-warn-border: #e2b04a;
+	--ctk-danger: #b42318;
+	--ctk-danger-soft: #fef3f2;
+	--ctk-danger-line: #f3c2be;
+	--ctk-info: #1e44b8;
+	--ctk-info-line: #c9d6f8;
+	--ctk-radius: 12px;
+	--ctk-radius-sm: 8px;
+
+	margin: 16px 20px 0 2px;
+	color: var(--ctk-ink-2);
+	font-size: 14px;
+	line-height: 1.55;
+	-webkit-font-smoothing: antialiased;
+	-webkit-tap-highlight-color: transparent;
+}
+
+.ctk-admin *,
+.ctk-admin *::before,
+.ctk-admin *::after {
+	box-sizing: border-box;
+}
+
+.ctk-admin a {
+	color: var(--ctk-accent);
+}
+
+.ctk-admin a:hover,
+.ctk-admin a:active {
+	color: var(--ctk-accent-ink);
+}
+
+.ctk-admin a:focus,
+.ctk-admin button:focus,
+.ctk-admin .button:focus {
+	box-shadow: none;
+	outline: none;
+}
+
+.ctk-admin a:focus-visible,
+.ctk-admin button:focus-visible,
+.ctk-admin .button:focus-visible,
+.ctk-admin input:focus-visible,
+.ctk-admin select:focus-visible,
+.ctk-admin textarea:focus-visible {
+	outline: 2px solid var(--ctk-accent);
+	outline-offset: 2px;
+}
+
+.ctk-admin code {
+	background: #f1f2f5;
+	border-radius: 5px;
+	padding: 1px 5px;
+	font-size: 12px;
+	color: var(--ctk-ink);
+}
+
+/* ── Header ───────────────────────────────────────────────── */
+
+.ctk-top {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	height: 60px;
+	padding: 0 20px;
+	background: var(--ctk-surface);
+	border: 1px solid var(--ctk-line);
+	border-radius: var(--ctk-radius);
+}
+
+.ctk-mark {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	width: 28px;
+	height: 28px;
+	border-radius: 7px;
+	background: var(--ctk-ink);
+	color: #fff;
+	font-weight: 700;
+	font-size: 12px;
+	flex: 0 0 auto;
+}
+
+.ctk-admin h1.ctk-brand {
+	margin: 0;
+	padding: 0;
+	font-size: 16px;
+	font-weight: 600;
+	line-height: 1.3;
+	color: var(--ctk-ink);
+}
+
+.ctk-version {
+	font-size: 12px;
+	color: #4b5563;
+	background: var(--ctk-off-soft);
+	border-radius: 999px;
+	padding: 2px 9px;
+	font-variant-numeric: tabular-nums;
+	white-space: nowrap;
+}
+
+.ctk-admin .wp-header-end {
+	margin: 0;
+}
+
+/* ── Sidebar + content ───────────────────────────────────── */
+
+.ctk-body {
+	display: flex;
+	align-items: flex-start;
+	gap: 28px;
+	margin-top: 20px;
+}
+
+.ctk-side {
+	flex: 0 0 216px;
+	display: flex;
+	flex-direction: column;
+	gap: 18px;
+	position: sticky;
+	top: 52px;
+}
+
+.ctk-side-group {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+}
+
+.ctk-side-label {
+	font-size: 11px;
+	font-weight: 600;
+	letter-spacing: .06em;
+	text-transform: uppercase;
+	color: var(--ctk-muted);
+	padding: 0 10px 6px;
+}
+
+.ctk-admin a.ctk-side-item {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+	height: 36px;
+	padding: 0 10px;
+	border-radius: var(--ctk-radius-sm);
+	color: var(--ctk-ink-2);
+	font-weight: 500;
+	text-decoration: none;
+	white-space: nowrap;
+}
+
+.ctk-admin a.ctk-side-item:hover {
+	background: var(--ctk-hover);
+	color: var(--ctk-ink);
+}
+
+.ctk-admin a.ctk-side-item.is-active {
+	background: var(--ctk-surface);
+	color: var(--ctk-ink);
+	box-shadow: 0 0 0 1px var(--ctk-line), 0 1px 2px rgba(16, 24, 40, .05);
+}
+
+.ctk-dot {
+	width: 7px;
+	height: 7px;
+	border-radius: 50%;
+	flex: 0 0 auto;
+}
+
+.ctk-dot.is-on {
+	background: var(--ctk-on-dot);
+}
+
+.ctk-dot.is-off {
+	background: var(--ctk-off-dot);
+}
+
+.ctk-content {
+	flex: 1 1 0;
+	min-width: 0;
+}
+
+/* ── Page heading and tabs ───────────────────────────────── */
+
+.ctk-page-head {
+	margin-bottom: 16px;
+}
+
+.ctk-crumb {
+	font-size: 13px;
+	color: var(--ctk-muted);
+}
+
+.ctk-admin h2.ctk-page-title {
+	display: flex;
+	align-items: center;
+	flex-wrap: wrap;
+	gap: 10px;
+	margin: 2px 0 0;
+	padding: 0;
+	font-size: 24px;
+	line-height: 1.25;
+	font-weight: 650;
+	letter-spacing: -.01em;
+	color: var(--ctk-ink);
+}
+
+.ctk-pill {
+	display: inline-block;
+	font-size: 12px;
+	font-weight: 600;
+	line-height: 1.6;
+	letter-spacing: 0;
+	border-radius: 999px;
+	padding: 1px 9px;
+	white-space: nowrap;
+}
+
+.ctk-pill.is-on {
+	background: var(--ctk-on-soft);
+	color: var(--ctk-on);
+}
+
+.ctk-pill.is-off {
+	background: var(--ctk-off-soft);
+	color: #4b5563;
+}
+
+.ctk-tabs,
+.ctk-subnav {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 4px;
+	border-bottom: 1px solid var(--ctk-line);
+	margin-bottom: 20px;
+}
+
+.ctk-admin a.ctk-tab,
+.ctk-admin a.ctk-subnav-item {
+	display: flex;
+	align-items: center;
+	height: 42px;
+	padding: 0 14px;
+	margin-bottom: -1px;
+	border-bottom: 2px solid transparent;
+	color: #4b5563;
+	font-weight: 500;
+	text-decoration: none;
+	white-space: nowrap;
+}
+
+.ctk-admin a.ctk-tab:hover,
+.ctk-admin a.ctk-subnav-item:hover {
+	color: var(--ctk-ink);
+}
+
+.ctk-admin a.ctk-tab.is-active,
+.ctk-admin a.ctk-subnav-item.is-active {
+	color: var(--ctk-ink);
+	border-bottom-color: var(--ctk-ink);
+}
+
+/* A page with sections, whose section has its own sub-tabs, gets a quieter second row. */
+.ctk-tabs + .ctk-view .ctk-subnav {
+	border-bottom: 0;
+	gap: 6px;
+}
+
+.ctk-tabs + .ctk-view a.ctk-subnav-item {
+	height: 32px;
+	border: 1px solid var(--ctk-line);
+	border-radius: 999px;
+	margin: 0;
+	background: var(--ctk-surface);
+}
+
+.ctk-tabs + .ctk-view a.ctk-subnav-item.is-active {
+	background: var(--ctk-ink);
+	border-color: var(--ctk-ink);
+	color: #fff;
+}
+
+/* ── Cards ────────────────────────────────────────────────── */
+
+.ctk-admin .card {
+	max-width: none;
+	min-width: 0;
+	margin: 0 0 16px;
+	padding: 20px 24px;
+	background: var(--ctk-surface);
+	border: 1px solid var(--ctk-line);
+	border-radius: var(--ctk-radius);
+	box-shadow: none;
+	color: var(--ctk-ink-2);
+}
+
+.ctk-admin .card > :first-child {
+	margin-top: 0;
+}
+
+.ctk-admin .card > :last-child {
+	margin-bottom: 0;
+}
+
+.ctk-admin .card h2,
+.ctk-admin .ctk-view > h2 {
+	margin: 0 0 6px;
+	padding: 0;
+	font-size: 17px;
+	font-weight: 600;
+	line-height: 1.35;
+	color: var(--ctk-ink);
+}
+
+.ctk-admin .card h3,
+.ctk-admin .ctk-view > h3 {
+	font-size: 15px;
+	font-weight: 600;
+	color: var(--ctk-ink);
+	margin: 22px 0 6px;
+}
+
+.ctk-admin .card h4 {
+	color: var(--ctk-ink);
+}
+
+.ctk-admin p {
+	font-size: 14px;
+	line-height: 1.6;
+}
+
+.ctk-admin .description,
+.ctk-admin p.description {
+	color: var(--ctk-muted);
+	font-size: 13.5px;
+	font-style: normal;
+	line-height: 1.6;
+}
+
+.ctk-lede {
+	margin: -6px 0 18px;
+	color: #4b5563;
+	font-size: 15px;
+}
+
+/* ── Settings rows ───────────────────────────────────────── */
+
+.ctk-admin .form-table {
+	margin-top: 8px;
+}
+
+.ctk-admin .form-table th,
+.ctk-admin .form-table td {
+	padding: 16px 0;
+	vertical-align: top;
+}
+
+.ctk-admin .form-table th {
+	width: 200px;
+	padding-right: 24px;
+	font-weight: 600;
+	color: var(--ctk-ink);
+	line-height: 1.5;
+}
+
+.ctk-admin .form-table tr + tr > th,
+.ctk-admin .form-table tr + tr > td {
+	border-top: 1px solid var(--ctk-line-soft);
+}
+
+.ctk-admin .form-table td p {
+	margin-top: 6px;
+}
+
+.ctk-admin .form-table td > label:first-child {
+	color: var(--ctk-ink);
+}
+
+.ctk-admin p.submit {
+	margin: 16px 0 0;
+	padding: 16px 0 0;
+	border-top: 1px solid var(--ctk-line-soft);
+}
+
+/* ── Inputs ───────────────────────────────────────────────── */
+
+.ctk-admin input[type="text"],
+.ctk-admin input[type="email"],
+.ctk-admin input[type="url"],
+.ctk-admin input[type="number"],
+.ctk-admin input[type="password"],
+.ctk-admin input[type="search"],
+.ctk-admin input[type="date"],
+.ctk-admin input[type="datetime-local"],
+.ctk-admin select,
+.ctk-admin textarea {
+	border: 1px solid var(--ctk-line-strong);
+	border-radius: var(--ctk-radius-sm);
+	box-shadow: none;
+	color: var(--ctk-ink);
+	background-color: var(--ctk-surface);
+}
+
+.ctk-admin input[type="text"],
+.ctk-admin input[type="email"],
+.ctk-admin input[type="url"],
+.ctk-admin input[type="number"],
+.ctk-admin input[type="password"],
+.ctk-admin input[type="search"],
+.ctk-admin input[type="date"],
+.ctk-admin input[type="datetime-local"],
+.ctk-admin select {
+	min-height: 36px;
+	padding: 0 10px;
+}
+
+.ctk-admin select {
+	padding-right: 28px;
+}
+
+.ctk-admin textarea {
+	padding: 8px 10px;
+}
+
+.ctk-admin input:focus,
+.ctk-admin select:focus,
+.ctk-admin textarea:focus {
+	border-color: var(--ctk-accent);
+	box-shadow: 0 0 0 3px rgba(45, 91, 227, .15);
+	outline: none;
+}
+
+.ctk-admin input[type="checkbox"],
+.ctk-admin input[type="radio"] {
+	border-color: var(--ctk-line-strong);
+	box-shadow: none;
+}
+
+.ctk-admin input[type="checkbox"]:checked {
+	background: var(--ctk-accent);
+	border-color: var(--ctk-accent);
+}
+
+.ctk-admin input[type="checkbox"]:checked::before {
+	/* WordPress draws its tick in its blue; white reads on the accent. */
+	content: url("data:image/svg+xml;utf8,%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%20viewBox%3D%270%200%2020%2020%27%3E%3Cpath%20d%3D%27M14.83%204.89l1.34.94-5.81%208.38H9.02L5.78%209.67l1.34-1.25%202.57%202.4z%27%20fill%3D%27%23ffffff%27%2F%3E%3C%2Fsvg%3E");
+}
+
+.ctk-admin input[type="color"] {
+	width: 36px;
+	height: 32px;
+	padding: 2px;
+	border: 1px solid var(--ctk-line-strong);
+	border-radius: var(--ctk-radius-sm);
+	background: var(--ctk-surface);
+	cursor: pointer;
+	vertical-align: middle;
+}
+
+/* ── Buttons ──────────────────────────────────────────────── */
+
+.ctk-admin .button,
+.ctk-admin .button-secondary {
+	min-height: 36px;
+	line-height: 34px;
+	padding: 0 14px;
+	border: 1px solid var(--ctk-line-strong);
+	border-radius: var(--ctk-radius-sm);
+	background: var(--ctk-surface);
+	color: var(--ctk-ink);
+	font-weight: 500;
+	box-shadow: none;
+	text-shadow: none;
+}
+
+.ctk-admin .button:hover,
+.ctk-admin .button-secondary:hover {
+	background: var(--ctk-sunken);
+	border-color: #b8bfca;
+	color: var(--ctk-ink);
+}
+
+.ctk-admin .button-primary,
+.ctk-admin .button.button-primary {
+	background: var(--ctk-ink);
+	border-color: var(--ctk-ink);
+	color: #fff;
+	font-weight: 600;
+}
+
+.ctk-admin .button-primary:hover,
+.ctk-admin .button.button-primary:hover,
+.ctk-admin .button-primary:focus {
+	background: #1f2937;
+	border-color: #1f2937;
+	color: #fff;
+}
+
+.ctk-admin .button.button-small {
+	min-height: 30px;
+	line-height: 28px;
+	padding: 0 10px;
+	font-size: 13px;
+}
+
+.ctk-admin .button.button-link-delete,
+.ctk-admin .button-link-delete {
+	color: var(--ctk-danger);
+	border-color: var(--ctk-danger-line);
+}
+
+.ctk-admin .button.button-link-delete:hover,
+.ctk-admin .button-link-delete:hover {
+	background: var(--ctk-danger-soft);
+	color: var(--ctk-danger);
+	border-color: var(--ctk-danger);
+}
+
+.ctk-admin .button:disabled,
+.ctk-admin .button[disabled],
+.ctk-admin .button.disabled {
+	background: var(--ctk-sunken) !important;
+	border-color: var(--ctk-line) !important;
+	color: #9aa1ac !important;
+}
+
+.ctk-admin .button-primary:disabled,
+.ctk-admin .button-primary[disabled] {
+	background: #9aa1ac !important;
+	border-color: #9aa1ac !important;
+	color: #fff !important;
+}
+
+/* ── Tables ───────────────────────────────────────────────── */
+
+.ctk-admin table.widefat {
+	border: 1px solid var(--ctk-line);
+	border-radius: 10px;
+	box-shadow: none;
+	overflow: hidden;
+	background: var(--ctk-surface);
+}
+
+.ctk-admin .widefat thead th,
+.ctk-admin .widefat thead td,
+.ctk-admin .widefat tfoot th,
+.ctk-admin .widefat tfoot td {
+	background: var(--ctk-sunken);
+	border-bottom: 1px solid var(--ctk-line);
+	color: var(--ctk-muted);
+	font-size: 12px;
+	font-weight: 600;
+	padding: 10px 12px;
+}
+
+.ctk-admin .widefat td,
+.ctk-admin .widefat tbody th {
+	padding: 10px 12px;
+	color: var(--ctk-ink-2);
+	vertical-align: middle;
+}
+
+.ctk-admin .widefat tbody tr + tr > td,
+.ctk-admin .widefat tbody tr + tr > th {
+	border-top: 1px solid var(--ctk-line-soft);
+}
+
+.ctk-admin .striped > tbody > :nth-child(odd) {
+	background: var(--ctk-surface);
+}
+
+.ctk-admin .striped > tbody > :nth-child(even) {
+	background: #fbfbfc;
+}
+
+.ctk-admin .tablenav {
+	height: auto;
+	margin: 12px 0 0;
+}
+
+.ctk-admin .tablenav-pages .page-numbers {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	min-width: 32px;
+	height: 32px;
+	padding: 0 8px;
+	border: 1px solid var(--ctk-line);
+	border-radius: var(--ctk-radius-sm);
+	background: var(--ctk-surface);
+	color: var(--ctk-ink-2);
+	text-decoration: none;
+}
+
+.ctk-admin .tablenav-pages .page-numbers.current {
+	background: var(--ctk-ink);
+	border-color: var(--ctk-ink);
+	color: #fff;
+}
+
+/* ── Notices and callouts ────────────────────────────────── */
+
+.ctk-admin .notice,
+.ctk-admin div.updated,
+.ctk-admin div.error {
+	margin: 0 0 16px;
+	padding: 4px 14px;
+	border: 1px solid var(--ctk-info-line);
+	border-radius: 10px;
+	background: var(--ctk-accent-soft);
+	box-shadow: none;
+	color: var(--ctk-ink);
+}
+
+.ctk-admin .notice p {
+	margin: 8px 0;
+	font-size: 14px;
+}
+
+.ctk-admin .notice-success,
+.ctk-admin div.updated {
+	background: var(--ctk-on-soft);
+	border-color: #b7e2c5;
+}
+
+.ctk-admin .notice-warning {
+	background: var(--ctk-warn-soft);
+	border-color: var(--ctk-warn-line);
+}
+
+.ctk-admin .notice-error,
+.ctk-admin div.error {
+	background: var(--ctk-danger-soft);
+	border-color: var(--ctk-danger-line);
+}
+
+.ctk-admin .notice.inline {
+	margin: 0 0 16px;
+}
+
+.ctk-callout {
+	margin: 0 0 16px;
+	padding: 10px 14px;
+	border: 1px solid var(--ctk-info-line);
+	border-radius: 10px;
+	background: var(--ctk-accent-soft);
+	color: #1e3a8a;
+	font-size: 13.5px;
+	line-height: 1.6;
+}
+
+.ctk-callout.is-warn {
+	background: var(--ctk-warn-soft);
+	border-color: var(--ctk-warn-line);
+	color: #5c3d00;
+}
+
+/* ── A card that folds: optional or explanatory sections ─ */
+
+.ctk-admin details.card.ctk-fold > summary {
+	display: flex;
+	align-items: center;
+	flex-wrap: wrap;
+	gap: 4px 12px;
+	margin: -20px -24px;
+	padding: 20px 24px 20px 52px;
+	position: relative;
+	cursor: pointer;
+	list-style: none;
+	border-radius: var(--ctk-radius);
+}
+
+.ctk-admin details.card.ctk-fold > summary::-webkit-details-marker {
+	display: none;
+}
+
+.ctk-admin details.card.ctk-fold > summary::before {
+	content: "";
+	position: absolute;
+	left: 26px;
+	top: 50%;
+	width: 7px;
+	height: 7px;
+	margin-top: -5px;
+	border-right: 1.5px solid var(--ctk-ink-2);
+	border-bottom: 1.5px solid var(--ctk-ink-2);
+	transform: rotate(-45deg);
+	transition: transform .15s;
+}
+
+.ctk-admin details.card.ctk-fold[open] > summary::before {
+	transform: rotate(45deg);
+	margin-top: -6px;
+}
+
+.ctk-admin details.card.ctk-fold > summary:hover {
+	background: var(--ctk-sunken);
+}
+
+.ctk-admin details.card.ctk-fold > summary h2 {
+	margin: 0;
+}
+
+.ctk-admin details.card.ctk-fold > summary span {
+	color: var(--ctk-muted);
+	font-size: 13px;
+}
+
+.ctk-admin details.card.ctk-fold[open] > summary {
+	margin-bottom: 4px;
+	border-radius: var(--ctk-radius) var(--ctk-radius) 0 0;
+}
+
+.ctk-admin .ctk-settings > .card {
+	margin: 0;
+}
+
+/* ── Grids that drop to one column on a phone ──────────── */
+
+.ctk-grid {
+	display: grid;
+	gap: 16px;
+	align-items: start;
+}
+
+.ctk-grid.is-tight {
+	gap: 12px;
+}
+
+.ctk-grid-2 {
+	grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.ctk-grid-3 {
+	grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.ctk-grid > .card {
+	margin: 0;
+}
+
+.ctk-grid:has(> .card) {
+	margin-bottom: 16px;
+}
+
+/* A small labelled value box, used in member panels. */
+.ctk-stat {
+	min-width: 0;
+	padding: 12px;
+	background: var(--ctk-sunken);
+	border: 1px solid var(--ctk-line);
+	border-radius: var(--ctk-radius-sm);
+	overflow-wrap: anywhere;
+}
+
+.ctk-stat-label {
+	margin-bottom: 6px;
+	font-size: 11px;
+	font-weight: 600;
+	letter-spacing: .04em;
+	text-transform: uppercase;
+	color: var(--ctk-muted);
+}
+
+/* ── Setting cards (switch + summary, details below) ─────── */
+
+.ctk-settings {
+	display: flex;
+	flex-direction: column;
+	gap: 14px;
+}
+
+.ctk-setting {
+	background: var(--ctk-surface);
+	border: 1px solid var(--ctk-line);
+	border-radius: var(--ctk-radius);
+}
+
+.ctk-setting-head {
+	display: flex;
+	align-items: flex-start;
+	justify-content: space-between;
+	gap: 16px;
+	padding: 18px 20px;
+}
+
+.ctk-admin .ctk-setting-head h3 {
+	margin: 0;
+	font-size: 15px;
+	font-weight: 600;
+	color: var(--ctk-ink);
+}
+
+.ctk-admin .ctk-setting-head p {
+	margin: 3px 0 0;
+	color: #4b5563;
+}
+
+.ctk-setting-body {
+	padding: 14px 20px 18px;
+	border-top: 1px solid var(--ctk-line-soft);
+}
+
+.ctk-setting-body > :first-child {
+	margin-top: 0;
+}
+
+.ctk-setting-body > :last-child {
+	margin-bottom: 0;
+}
+
+.ctk-setting-body .ctk-callout {
+	margin: 12px 0 0;
+}
+
+/* Link Previews: the before and after pair. */
+.ctk-lp-compare {
+	display: grid;
+	grid-template-columns: repeat(2, minmax(0, 1fr));
+	gap: 16px;
+}
+
+.ctk-admin .ctk-lp-side h4 {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	margin: 0 0 8px;
+	font-size: 13px;
+	font-weight: 600;
+}
+
+.ctk-lp-side.is-without h4 {
+	color: var(--ctk-danger);
+}
+
+.ctk-lp-side.is-with h4 {
+	color: var(--ctk-on);
+}
+
+.ctk-lp-card {
+	overflow: hidden;
+	background: var(--ctk-surface);
+	border: 1px solid var(--ctk-line);
+	border-radius: var(--ctk-radius-sm);
+}
+
+.ctk-lp-picture {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	justify-content: center;
+	gap: 6px;
+	height: 112px;
+	padding: 10px;
+	font-size: 13px;
+	font-weight: 500;
+	text-align: center;
+}
+
+.is-without .ctk-lp-picture {
+	color: var(--ctk-danger);
+	background: var(--ctk-danger-soft);
+}
+
+.is-with .ctk-lp-picture {
+	color: var(--ctk-on);
+	background: var(--ctk-on-soft);
+}
+
+.ctk-lp-words {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+	padding: 10px 12px;
+	font-size: 13px;
+	border-top: 1px solid var(--ctk-line);
+	background: var(--ctk-sunken);
+}
+
+.ctk-lp-words strong {
+	color: var(--ctk-ink);
+	font-weight: 600;
+}
+
+.ctk-lp-words span {
+	color: var(--ctk-muted);
+}
+
+.ctk-admin .ctk-lp-steps {
+	margin: 12px 0 0;
+	padding-left: 20px;
+	font-size: 13px;
+}
+
+.ctk-admin .ctk-lp-steps li {
+	margin-bottom: 4px;
+}
+
+/* A switch is the same checkbox the form always posted, drawn as a toggle. */
+.ctk-switch {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	flex: 0 0 auto;
+	min-width: 44px;
+	min-height: 44px;
+	margin: -10px -6px 0 0;
+	cursor: pointer;
+}
+
+.ctk-admin .ctk-switch input[type="checkbox"] {
+	-webkit-appearance: none;
+	appearance: none;
+	position: relative;
+	width: 40px;
+	height: 24px;
+	margin: 0;
+	border: 0;
+	border-radius: 999px;
+	background: var(--ctk-off-dot);
+	cursor: pointer;
+	transition: background .15s;
+}
+
+.ctk-admin .ctk-switch input[type="checkbox"]::before {
+	content: "";
+	position: absolute;
+	top: 3px;
+	left: 3px;
+	width: 18px;
+	height: 18px;
+	margin: 0;
+	border-radius: 50%;
+	background: #fff;
+	box-shadow: 0 1px 2px rgba(0, 0, 0, .25);
+	transition: transform .15s;
+}
+
+.ctk-admin .ctk-switch input[type="checkbox"]:checked {
+	background: var(--ctk-accent);
+}
+
+.ctk-admin .ctk-switch input[type="checkbox"]:checked::before {
+	content: "";
+	transform: translateX(16px);
+}
+
+.ctk-admin .ctk-switch.is-danger input[type="checkbox"]:checked {
+	background: var(--ctk-danger);
+}
+
+.ctk-admin .ctk-switch input[type="checkbox"]:disabled {
+	opacity: .5;
+	cursor: not-allowed;
+}
+
+/* A switch inside a table cell or beside a label sits in line, without the card offset. */
+.ctk-admin td .ctk-switch,
+.ctk-switch-row .ctk-switch {
+	margin: 0;
+	min-height: 36px;
+}
+
+.ctk-switch-row {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+}
+
+.ctk-admin details.ctk-more summary {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	min-height: 32px;
+	color: var(--ctk-ink-2);
+	font-weight: 500;
+	font-size: 13px;
+	cursor: pointer;
+	list-style: none;
+}
+
+.ctk-admin details.ctk-more summary::-webkit-details-marker {
+	display: none;
+}
+
+.ctk-admin details.ctk-more summary::before {
+	content: "";
+	width: 6px;
+	height: 6px;
+	margin: 0 4px 0 2px;
+	border-right: 1.5px solid currentColor;
+	border-bottom: 1.5px solid currentColor;
+	transform: rotate(-45deg);
+	transition: transform .15s;
+}
+
+.ctk-admin details.ctk-more[open] summary::before {
+	transform: rotate(45deg);
+}
+
+.ctk-admin details.ctk-more p {
+	margin: 4px 0 0;
+	color: #4b5563;
+}
+
+/* Preview tiles (Topic Styles, Menu Button). Colors come from the portal's own CSS, printed by the view. */
+.ctk-admin .ctk-ts-previews {
+	margin-bottom: 16px;
+}
+
+.ctk-admin .ctk-ts-tile {
+	padding: 14px 16px 16px;
+	border: 1px solid var(--ctk-line);
+	border-radius: 8px;
+}
+
+.ctk-admin .ctk-ts-mode {
+	display: block;
+	margin-bottom: 12px;
+	font-size: 12px;
+	font-weight: 600;
+}
+
+.ctk-admin .ctk-ts-tile .fcom_topics_filters {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+}
+
+.ctk-admin .ctk-ts-state {
+	display: inline-flex;
+	flex-direction: column;
+	align-items: center;
+	gap: 6px;
+}
+
+.ctk-admin .ctk-ts-state small {
+	font-size: 11px;
+}
+
+.ctk-admin .ctk-ts-tile .el-button {
+	height: 32px;
+	padding: 0 15px;
+	border-width: 1px;
+	border-style: solid;
+	font-size: 14px;
+	font-weight: 500;
+	cursor: pointer;
+}
+
+.ctk-admin .ctk-ts-card {
+	padding: 14px;
+	border-radius: 8px;
+	background: var(--ctk-ts-card);
+}
+
+.ctk-admin .ctk-ts-tile .fcom_feed_topics {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 5px;
+}
+
+.ctk-admin .ctk-ts-author {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	font-size: 13px;
+	font-weight: 500;
+}
+
+.ctk-admin .ctk-ts-avatar {
+	width: 45px;
+	height: 45px;
+	border-radius: 50%;
+	background: currentColor;
+	opacity: 0.35;
+}
+
+.ctk-admin .ctk-mb-bar {
+	display: flex;
+	align-items: flex-start;
+	gap: 24px;
+}
+
+/* Light/dark colour table. */
+.ctk-admin table.ctk-colors {
+	width: 100%;
+	border-collapse: collapse;
+	margin: 0 0 8px;
+}
+
+.ctk-admin .ctk-colors thead th {
+	padding: 0 8px 8px 0;
+	text-align: left;
+	font-size: 12px;
+	font-weight: 600;
+	color: var(--ctk-muted);
+}
+
+.ctk-admin .ctk-colors tbody th,
+.ctk-admin .ctk-colors td {
+	padding: 10px 8px 10px 0;
+	border-top: 1px solid var(--ctk-line-soft);
+	vertical-align: middle;
+	text-align: left;
+}
+
+.ctk-admin .ctk-colors tbody th {
+	width: 40%;
+	font-weight: 500;
+	color: var(--ctk-ink);
+}
+
+.ctk-admin .ctk-colors tbody th span {
+	display: block;
+	font-weight: 400;
+	font-size: 12px;
+	color: var(--ctk-muted);
+}
+
+.ctk-color-cell {
+	display: inline-flex;
+	align-items: center;
+	gap: 10px;
+	flex-wrap: wrap;
+}
+
+.ctk-color-cell label,
+.ctk-inline-field label {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	font-size: 13px;
+	color: var(--ctk-muted);
+}
+
+.ctk-inline-field {
+	display: flex;
+	align-items: center;
+	flex-wrap: wrap;
+	gap: 8px 10px;
+	margin-bottom: 14px;
+}
+
+.ctk-inline-field > label:first-child {
+	min-width: 60px;
+	font-weight: 600;
+	font-size: 14px;
+	color: var(--ctk-ink);
+}
+
+.ctk-inline-field > label:last-child {
+	margin-left: 8px;
+}
+
+/* Save bar that stays on screen while a long form scrolls. */
+.ctk-savebar {
+	position: sticky;
+	bottom: 0;
+	z-index: 5;
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	flex-wrap: wrap;
+	gap: 10px 16px;
+	padding: 12px 16px;
+	background: rgba(255, 255, 255, .94);
+	-webkit-backdrop-filter: blur(6px);
+	backdrop-filter: blur(6px);
+	border: 1px solid var(--ctk-line);
+	border-radius: var(--ctk-radius);
+	box-shadow: 0 -2px 10px rgba(16, 24, 40, .06);
+}
+
+.ctk-savebar span {
+	color: var(--ctk-muted);
+	font-size: 13px;
+}
+
+.ctk-admin .ctk-savebar .button {
+	min-height: 40px;
+	line-height: 38px;
+	padding: 0 18px;
+}
+
+/* ── Overview ─────────────────────────────────────────────── */
+
+.ctk-overview {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 24px;
+	align-items: flex-start;
+}
+
+.ctk-overview-mods {
+	flex: 999 1 520px;
+	min-width: 0;
+	display: flex;
+	flex-direction: column;
+	gap: 22px;
+}
+
+.ctk-admin h3.ctk-section-label {
+	margin: 0 0 10px;
+	font-size: 13px;
+	font-weight: 600;
+	color: var(--ctk-ink-2);
+}
+
+.ctk-mod-grid {
+	display: grid;
+	grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+	gap: 12px;
+}
+
+.ctk-admin a.ctk-mod {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	height: 156px;
+	padding: 16px;
+	background: var(--ctk-surface);
+	border: 1px solid var(--ctk-line);
+	border-radius: var(--ctk-radius);
+	color: var(--ctk-ink);
+	text-decoration: none;
+	transition: border-color .15s, box-shadow .15s;
+}
+
+.ctk-admin a.ctk-mod:hover {
+	border-color: #c9cfd9;
+	box-shadow: 0 2px 6px rgba(16, 24, 40, .06);
+	color: var(--ctk-ink);
+}
+
+.ctk-mod-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+}
+
+.ctk-mod-name {
+	font-weight: 600;
+	font-size: 15px;
+}
+
+.ctk-mod-desc {
+	flex: 1;
+	color: #4b5563;
+	font-size: 13px;
+	line-height: 1.5;
+	overflow: hidden;
+}
+
+.ctk-mod-foot {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+	padding-top: 9px;
+	border-top: 1px solid var(--ctk-line-soft);
+	color: var(--ctk-muted);
+	font-size: 12px;
+}
+
+.ctk-panel {
+	background: var(--ctk-surface);
+	border: 1px solid var(--ctk-line);
+	border-radius: var(--ctk-radius);
+}
+
+.ctk-overview-recent {
+	flex: 1 1 300px;
+	max-width: 400px;
+}
+
+.ctk-panel-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	padding: 14px 16px;
+	border-bottom: 1px solid var(--ctk-line-soft);
+}
+
+.ctk-admin .ctk-panel-head h3 {
+	margin: 0;
+	font-size: 15px;
+	font-weight: 600;
+	color: var(--ctk-ink);
+}
+
+.ctk-feed {
+	margin: 0;
+	padding: 0;
+	list-style: none;
+}
+
+.ctk-feed li {
+	display: flex;
+	gap: 10px;
+	margin: 0;
+	padding: 11px 16px;
+	border-bottom: 1px solid #f4f5f7;
+	font-size: 13px;
+}
+
+.ctk-feed li:last-child {
+	border-bottom: 0;
+}
+
+.ctk-feed-time {
+	flex: 0 0 auto;
+	min-width: 76px;
+	white-space: nowrap;
+	color: var(--ctk-muted);
+	font-variant-numeric: tabular-nums;
+}
+
+.ctk-feed-body {
+	display: flex;
+	flex-direction: column;
+	gap: 3px;
+	min-width: 0;
+	overflow-wrap: anywhere;
+}
+
+.ctk-chip {
+	align-self: flex-start;
+	font-size: 11px;
+	font-weight: 600;
+	color: var(--ctk-ink-2);
+	background: #f1f2f5;
+	border-radius: 6px;
+	padding: 1px 7px;
+	white-space: nowrap;
+}
+
+.ctk-feed-user {
+	color: var(--ctk-ink);
+}
+
+.ctk-feed-text {
+	color: #4b5563;
+}
+
+.ctk-empty {
+	padding: 16px;
+	margin: 0;
+	color: var(--ctk-muted);
+}
+
+/* ── Member Lookup ──────────────────────────────────────── */
+
+.ctk-admin form.ctk-lookup-search {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+	padding: 14px 16px;
+}
+
+/* The box and its live suggestions. The list floats over the page, so nothing below moves. */
+.ctk-admin .ctk-lookup-field {
+	position: relative;
+	flex: 1 1 260px;
+	min-width: 0;
+}
+
+.ctk-admin .ctk-lookup-search input[type="search"] {
+	width: 100%;
+	min-height: 40px;
+}
+
+.ctk-admin .ctk-lookup-list {
+	position: absolute;
+	z-index: 50;
+	top: calc(100% + 4px);
+	left: 0;
+	right: 0;
+	max-height: 320px;
+	overflow-y: auto;
+	margin: 0;
+	padding: 4px;
+	list-style: none;
+	background: var(--ctk-surface);
+	border: 1px solid var(--ctk-line-strong);
+	border-radius: var(--ctk-radius-sm);
+	box-shadow: 0 8px 24px rgba(17, 24, 39, .12);
+}
+
+.ctk-admin .ctk-lookup-list li {
+	display: grid;
+	gap: 1px;
+	margin: 0;
+	padding: 8px 10px;
+	border-radius: 6px;
+	cursor: pointer;
+}
+
+.ctk-admin .ctk-lookup-list li strong {
+	color: var(--ctk-ink);
+	font-weight: 600;
+}
+
+.ctk-admin .ctk-lookup-list li span {
+	color: var(--ctk-muted);
+	font-size: 12px;
+	overflow-wrap: anywhere;
+}
+
+.ctk-admin .ctk-lookup-list li[aria-selected="true"] {
+	background: var(--ctk-accent-soft);
+}
+
+.ctk-admin .ctk-lookup-list li.ctk-lookup-empty {
+	color: var(--ctk-muted);
+	cursor: default;
+}
+
+.ctk-admin .ctk-lookup-search .button {
+	min-height: 40px;
+}
+
+.ctk-admin .ctk-member-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	flex-wrap: wrap;
+	gap: 12px 20px;
+}
+
+.ctk-admin .ctk-member-head h2 {
+	font-size: 20px;
+}
+
+.ctk-admin .ctk-member-head p {
+	margin: 0;
+}
+
+.ctk-member-links {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+}
+
+.ctk-card-head {
+	display: flex;
+	align-items: baseline;
+	justify-content: space-between;
+	gap: 12px;
+	margin-bottom: 12px;
+}
+
+.ctk-admin .ctk-card-head h2 {
+	margin: 0;
+}
+
+.ctk-card-head a {
+	font-size: 13px;
+	white-space: nowrap;
+}
+
+.ctk-plain-list {
+	margin: 0;
+	padding: 0;
+	list-style: none;
+}
+
+.ctk-plain-list li {
+	padding: 8px 0;
+	margin: 0;
+	border-top: 1px solid var(--ctk-line-soft);
+}
+
+/* ── Narrow screens ──────────────────────────────────────── */
+
+@media (max-width: 960px) {
+	.ctk-body {
+		flex-direction: column;
+		align-items: stretch;
+		gap: 16px;
+	}
+
+	/* The one nav becomes a row of chips that scrolls sideways. */
+	.ctk-side {
+		position: static;
+		flex: none;
+		width: 100%;
+		flex-direction: row;
+		gap: 8px;
+		overflow-x: auto;
+		padding-bottom: 4px;
+		scrollbar-width: none;
+	}
+
+	.ctk-side-group {
+		flex-direction: row;
+		gap: 8px;
+	}
+
+	.ctk-side-label {
+		display: none;
+	}
+
+	.ctk-admin a.ctk-side-item {
+		height: 36px;
+		padding: 0 12px;
+		border: 1px solid var(--ctk-line);
+		border-radius: 999px;
+		background: var(--ctk-surface);
+	}
+
+	.ctk-admin a.ctk-side-item.is-active {
+		background: var(--ctk-ink);
+		border-color: var(--ctk-ink);
+		color: #fff;
+		box-shadow: none;
+	}
+
+	.ctk-side,
+	.ctk-content {
+		min-width: 0;
+		max-width: 100%;
+	}
+}
+
+@media (max-width: 782px) {
+	.ctk-admin {
+		margin: 10px 10px 0 0;
+	}
+
+	.ctk-lp-compare {
+		grid-template-columns: minmax(0, 1fr);
+	}
+
+	.ctk-admin .card {
+		padding: 16px;
+	}
+
+	.ctk-grid-2,
+	.ctk-grid-3 {
+		grid-template-columns: minmax(0, 1fr);
+	}
+
+	.ctk-setting-head,
+	.ctk-setting-body {
+		padding-left: 16px;
+		padding-right: 16px;
+	}
+
+	.ctk-admin details.card.ctk-fold > summary {
+		margin: -16px;
+		padding: 16px 16px 16px 40px;
+	}
+
+	.ctk-admin details.card.ctk-fold > summary::before {
+		left: 18px;
+	}
+
+	.ctk-admin .ctk-colors tbody th {
+		width: 34%;
+	}
+
+	.ctk-admin .ctk-savebar .button {
+		flex: 1;
+	}
+
+	.ctk-admin h2.ctk-page-title {
+		font-size: 21px;
+	}
+
+	.ctk-tabs,
+	.ctk-subnav {
+		flex-wrap: nowrap;
+		overflow-x: auto;
+		scrollbar-width: none;
+	}
+
+	.ctk-admin .form-table th {
+		width: auto;
+		padding: 16px 0 0;
+		border-top: 1px solid var(--ctk-line-soft);
+	}
+
+	.ctk-admin .form-table tr:first-child > th {
+		border-top: 0;
+	}
+
+	.ctk-admin .form-table tr + tr > td {
+		border-top: 0;
+	}
+
+	.ctk-admin .form-table td {
+		padding: 8px 0 16px;
+	}
+
+	/* Wide tables keep readable columns and scroll inside their card instead of the page. */
+	.ctk-admin .card {
+		overflow-x: auto;
+	}
+
+	/* No table here, and a scrolling card would clip Member Lookup's dropdown. */
+	.ctk-admin .card.ctk-lookup-search {
+		overflow: visible;
+	}
+
+	.ctk-admin table.widefat:has(thead th:nth-child(4)) {
+		min-width: 640px;
+	}
+
+	.ctk-overview-recent {
+		max-width: none;
+	}
+
+	.ctk-version {
+		margin-left: auto;
+	}
+}
+
+/* ── Freshness (Engagement page) ─────────────────────────── */
+
+/* The table scrolls inside its card at any width, never the page. */
+.ctk-table-scroll {
+	overflow-x: auto;
+}
+
+.ctk-num,
+.ctk-admin .ctk-fresh-table .ctk-num {
+	text-align: right;
+	font-variant-numeric: tabular-nums;
+	white-space: nowrap;
+}
+
+/* The summary boxes above the scores card. */
+.ctk-fresh-stats {
+	margin-bottom: 16px;
+}
+
+/* The sorted column carries the bar; its width is fixed so bars line up row to row. */
+.ctk-fresh-table .ctk-fresh-sorted {
+	width: 38%;
+	min-width: 180px;
+}
+
+.ctk-fresh-table th a {
+	text-decoration: none;
+}
+
+.ctk-fresh-table th.ctk-fresh-sorted a {
+	color: var(--ctk-ink);
+	font-weight: 600;
+}
+
+.ctk-bar {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+}
+
+.ctk-bar .ctk-num {
+	flex: 0 0 2.5em;
+}
+
+.ctk-bar-track {
+	flex: 1 1 auto;
+	height: 8px;
+	background: var(--ctk-line-soft);
+	border-radius: 4px;
+	overflow: hidden;
+}
+
+.ctk-bar-fill {
+	display: block;
+	height: 100%;
+	background: var(--ctk-accent);
+	border-radius: 4px;
+}
+
+/* A quiet inline label beside a name: Staff, Cooling off, No profile. */
+.ctk-tag {
+	display: inline-block;
+	margin-left: 6px;
+	padding: 0 7px;
+	font-size: 11px;
+	line-height: 18px;
+	color: var(--ctk-muted);
+	border: 1px solid var(--ctk-line-strong);
+	border-radius: 999px;
+	white-space: nowrap;
+}
+
+.ctk-tag.is-warn {
+	color: var(--ctk-warn);
+	border-color: var(--ctk-warn-border);
+	background: var(--ctk-warn-soft);
+}
+
+/* ── Access: chips for tags, courses and spaces ─────────── */
+
+.ctk-chip {
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+	margin: 2px 4px 2px 0;
+	padding: 2px 8px;
+	font-size: 12px;
+	line-height: 18px;
+	border: 1px solid var(--ctk-line-strong);
+	border-radius: 6px;
+	background: var(--ctk-sunken);
+	color: var(--ctk-ink-2);
+	vertical-align: middle;
+	white-space: nowrap;
+}
+
+.ctk-chip svg {
+	width: 13px;
+	height: 13px;
+	flex: none;
+	fill: none;
+	stroke: currentColor;
+	stroke-width: 2;
+	stroke-linecap: round;
+	stroke-linejoin: round;
+}
+
+.ctk-chip-tag {
+	border-color: var(--ctk-info-line);
+	background: var(--ctk-accent-soft);
+	color: var(--ctk-accent-ink);
+	font-weight: 600;
+}
+
+.ctk-chip-course {
+	border-color: var(--ctk-on-line);
+	background: var(--ctk-on-soft);
+	color: var(--ctk-on);
+}
+
+.ctk-chip-legend {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+	align-items: center;
+	margin: 12px 0 8px;
+}
+
+.ctk-row-actions {
+	margin-top: 2px;
+	font-size: 12px;
+}
+
+.ctk-row-actions .button-link-delete {
+	padding: 0;
+	border: 0;
+	background: none;
+	font-size: 12px;
+	cursor: pointer;
+}
+
+/* ── Access: tick lists for tags, courses and spaces ────── */
+
+.ctk-pick-tools {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+	align-items: center;
+	margin-bottom: 8px;
+}
+
+.ctk-pick {
+	max-width: 620px;
+	max-height: 320px;
+	overflow-y: auto;
+	border: 1px solid var(--ctk-line-strong);
+	border-radius: var(--ctk-radius-sm);
+	background: var(--ctk-surface);
+}
+
+.ctk-admin .ctk-pick label {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	margin: 0;
+	padding: 8px 14px;
+	border-bottom: 1px solid var(--ctk-line-soft);
+	cursor: pointer;
+}
+
+.ctk-admin .ctk-pick label:last-child {
+	border-bottom: 0;
+}
+
+.ctk-admin .ctk-pick label:has(input:checked) {
+	background: var(--ctk-accent-soft);
+}
+
+.ctk-pick label span {
+	flex: 1;
+	min-width: 0;
+}
+
+.ctk-pick label code {
+	background: none;
+	color: var(--ctk-muted);
+	font-size: 11px;
+}
+
+.ctk-impact {
+	display: grid;
+	grid-template-columns: repeat(3, minmax(0, 1fr));
+	gap: 12px;
+	margin-bottom: 16px;
+}
+
+.ctk-admin .ctk-impact .card {
+	margin: 0;
+}
+
+.ctk-big {
+	font-size: 28px;
+	font-weight: 700;
+	line-height: 1.2;
+	color: var(--ctk-ink);
+	font-variant-numeric: tabular-nums;
+}
+
+@media (max-width: 782px) {
+	.ctk-impact {
+		grid-template-columns: minmax(0, 1fr);
+	}
+}
+
+/* ── Cart Toolkit: form editor field rows show only the detail their mode needs ── */
+
+.ctk-field-rows [class^="ctk-for-"],
+.ctk-field-rows [class*=" ctk-for-"] {
+	display: none;
+}
+
+.ctk-field-rows tr[data-mode="ask"] .ctk-for-ask,
+.ctk-field-rows tr[data-mode="set"] .ctk-for-set,
+.ctk-field-rows tr[data-mode="link"] .ctk-for-link,
+.ctk-field-rows tr[data-mode="order"] .ctk-for-order {
+	display: inline-block;
+}
+
+.ctk-field-rows input[type="text"] {
+	width: 100%;
+	max-width: 280px;
+}
+
+.ctk-error-text {
+	color: var(--ctk-danger);
+}
+
+.ctk-field-edit summary {
+	cursor: pointer;
+}

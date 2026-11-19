@@ -1,0 +1,2256 @@
+<?php
+
+namespace FluentCart\App\Helpers;
+
+use FluentCart\Api\Confirmation;
+use FluentCart\Api\CurrencySettings;
+use FluentCart\Api\StoreSettings;
+use FluentCart\Api\Taxonomy;
+use FluentCart\App\App;
+use FluentCart\App\CPT\FluentProducts;
+use FluentCart\App\Models\Customer;
+use FluentCart\App\Models\ProductVariation;
+use FluentCart\App\Models\User;
+use FluentCart\App\Services\DateTime\DateFormatter;
+use FluentCart\App\Services\DateTime\DateTime;
+use FluentCart\App\Services\Payments\PaymentHelper;
+use FluentCart\App\Services\Localization\LocalizationManager;
+use FluentCart\App\Services\Money;
+use FluentCart\App\Services\Translations\TransStrings;
+use FluentCart\App\Services\URL;
+use FluentCart\Framework\Http\URL as BaseUrl;
+use FluentCart\Framework\Support\Arr;
+
+class Helper
+{
+    const PRODUCT_TYPE_SIMPLE = 'simple';
+    const PRODUCT_TYPE_SIMPLE_VARIATION = 'simple_variations';
+    const PRODUCT_TYPE_ADVANCE_VARIATION = 'advanced_variations';
+
+    const INSTANT_CHECKOUT_URL_PARAM = 'fct_cart_hash';
+
+    const IN_STOCK = 'in-stock';
+    const OUT_OF_STOCK = 'out-of-stock';
+
+    const ROLE_CAPABILITY_PREFIX = 'fluent_cart/permissions/';
+
+    const USER_ROLE = 'fluent_cart_customer';
+
+    const MIN_INSTALLMENT_TIMES = 2;
+
+    /**
+     * An installment plan must bill at least twice. times = 0 means unlimited
+     * (a plain recurring subscription) and times = 1 collects a single payment,
+     * which is a one-time purchase, not an installment plan.
+     *
+     * @param array $otherInfo A variant's other_info payload
+     * @return string|null Error message, or null when valid
+     */
+    /**
+     * One resolver for every `photo` a FluentCart record appends: the
+     * uploaded customer photo for the user when one is set, otherwise the
+     * WordPress avatar by user id or email. Gravatar is asked with
+     * default=404, so an address with no avatar of its own fails to load
+     * and the UI falls back to its placeholder icon instead of Gravatar's
+     * stock image. esc_url_raw throughout — the value travels through
+     * JSON, where esc_url's entity-encoded ampersands would break the
+     * query string.
+     *
+     * @param int|string|null $userId user id owning a possible uploaded photo
+     * @param string|null $email fallback identity when there is no user
+     * @return string the photo URL, or '' when avatars are off or the
+     *                record carries no identity to resolve one from
+     */
+    public static function getUserAvatarUrl($userId, $email, int $size = 100): string
+    {
+        if (!get_option('show_avatars')) {
+            return '';
+        }
+
+        if ($userId) {
+            $customPhotoUrl = esc_url_raw(
+                (string) get_user_meta((int) $userId, 'fc_customer_photo_url', true)
+            );
+
+            if ($customPhotoUrl) {
+                return $customPhotoUrl;
+            }
+        }
+
+        $userIdOrEmail = ((int) $userId) ?: (string) $email;
+
+        if (!$userIdOrEmail) {
+            return '';
+        }
+
+        $url = get_avatar_url($userIdOrEmail, [
+            'size'    => $size,
+            'default' => '404',
+        ]);
+
+        return $url ? esc_url_raw($url) : '';
+    }
+
+    public static function installmentTimesError($otherInfo)
+    {
+        if (Arr::get($otherInfo, 'installment', 'no') !== 'yes') {
+            return null;
+        }
+
+        $times = Arr::get($otherInfo, 'times', 0);
+
+        if (!is_numeric($times) || (int)$times < static::MIN_INSTALLMENT_TIMES) {
+            return __('Installment count must be 2 or more. A single installment is just a one-time payment — set the payment type to one-time instead.', 'fluent-cart');
+        }
+
+        return null;
+    }
+
+    public static function getUidSerial()
+    {
+        static $id = 0;
+
+        $id = $id + 1;
+
+        return $id;
+
+    }
+
+    /**
+     * Build a spec-compliant "Upgrade to Pro" URL.
+     *
+     * Follows the shared Fluent* UTM spec:
+     *   utm_source  = fluent-cart (fixed vocabulary, never the wp.org slug)
+     *   utm_medium  = free_plugin | pro_plugin (acquisition vs cross-sell)
+     *   utm_campaign= upgrade_pro (override for xsell_<target> / license_*)
+     *   utm_content = the exact placement, e.g. feature_lock_advanced_inventory
+     *   utm_term    = plugin version that generated the link
+     *   utm_id      = promo id, blank normally (omit unless passed)
+     *
+     * @param string $content   The utm_content placement.
+     * @param array  $overrides Override any utm_* param (e.g. utm_campaign for cross-sell).
+     * @return string
+     */
+    public static function getUpgradeUrl($content = 'upgrade_page', $overrides = []): string
+    {
+        $baseUrl = (string) apply_filters(
+            'fluent_cart/pro_upgrade_base_url',
+            'https://fluentcart.com/pricing/'
+        );
+
+        $params = wp_parse_args($overrides, [
+            'utm_source'   => 'fluent-cart',
+            'utm_medium'   => App::isProActive() ? 'pro_plugin' : 'free_plugin',
+            'utm_campaign' => 'upgrade_pro',
+            'utm_content'  => $content,
+            'utm_term'     => defined('FLUENTCART_VERSION') ? FLUENTCART_VERSION : '',
+        ]);
+
+        // Drop any blank params (e.g. an unset utm_id) so they never hit the URL.
+        $params = array_filter($params, function ($value) {
+            return $value !== '' && $value !== null;
+        });
+
+        return add_query_arg($params, $baseUrl);
+    }
+
+    public static function getRestInfo()
+    {
+        $app = App::getInstance();
+
+        $ns = $app->config->get('app.rest_namespace');
+        $ver = $app->config->get('app.rest_version');
+
+        return [
+            'base_url'  => self::getBaseRestUrl(),
+            'url'       => self::getFullRestUrl($ns, $ver),
+            'nonce'     => wp_create_nonce('wp_rest'),
+            'namespace' => $ns,
+            'version'   => $ver,
+        ];
+    }
+
+
+    /**
+     * Get base rest url by examining the permalink.
+     *
+     * @see https://wordpress.stackexchange.com/questions/273144/can-i-use-rest-api-on-plain-permalink-format
+     *
+     * @return string
+     */
+    protected static function getBaseRestUrl()
+    {
+        if (get_option('permalink_structure')) {
+            return esc_url_raw(rest_url());
+        }
+
+        return esc_url_raw(
+            rtrim(get_site_url(), '/') . "/?rest_route=/"
+        );
+    }
+
+    /**
+     * Get the full rest url by examining the permalink
+     * (full means, including the namespace/version).
+     *
+     * @see https://wordpress.stackexchange.com/questions/273144/can-i-use-rest-api-on-plain-permalink-format
+     *
+     * @return string
+     */
+    protected static function getFullRestUrl($ns, $ver)
+    {
+        if (get_option('permalink_structure')) {
+            return esc_url_raw(rest_url($ns . '/' . $ver));
+        }
+
+        return esc_url_raw(
+            rtrim(get_site_url(), '/') . "/?rest_route=/{$ns}/{$ver}"
+        );
+    }
+
+
+    public static function shopConfig($key = false)
+    {
+        /**
+         * todo - need to review for more improvement : AR
+         */
+        $currencySettings = (fluentCart(CurrencySettings::class))->get();
+        $storeSettings = (new StoreSettings())->get([
+            'store_name', 'store_logo', 'weight_unit', 'dimension_unit'
+        ]);
+        $storeSettings['shipping_packages'] = self::getShippingPackages();
+
+        $settings = array_merge($currencySettings, $storeSettings);
+
+
+        if (!$key) {
+            return $settings;
+        }
+
+        if (is_array($key)) {
+            return Arr::only($settings, $key);
+        } else {
+            return Arr::get($settings, $key);
+        }
+
+    }
+
+    /**
+     * Convert weight between units using grams as base.
+     *
+     * @param float $value
+     * @param string $fromUnit
+     * @param string $toUnit
+     * @return float
+     */
+    public static function convertWeight($value, $fromUnit, $toUnit)
+    {
+        if ($fromUnit === $toUnit || !$value) {
+            return (float)$value;
+        }
+
+        $toGrams = [
+            'g'   => 1,
+            'kg'  => 1000,
+            'lbs' => 453.592,
+            'oz'  => 28.3495,
+        ];
+
+        $fromFactor = isset($toGrams[$fromUnit]) ? $toGrams[$fromUnit] : 1;
+        $toFactor = isset($toGrams[$toUnit]) ? $toGrams[$toUnit] : 1;
+
+        $grams = $value * $fromFactor;
+        return round($grams / $toFactor, 6);
+    }
+
+    /**
+     * Get all shipping packages from store settings.
+     *
+     * @return array
+     */
+    public static function getShippingPackages()
+    {
+        // fluent_cart_get_option() caches per request and refreshes on update.
+        return fluent_cart_get_option('shipping_packages', []) ?: [];
+    }
+
+    /**
+     * Get the default shipping package.
+     *
+     * @return array|null
+     */
+    public static function getDefaultPackage()
+    {
+        $packages = self::getShippingPackages();
+        foreach ($packages as $package) {
+            if (!empty($package['is_default'])) {
+                return $package;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Find a shipping package by slug.
+     *
+     * @param string $slug
+     * @return array|null
+     */
+    public static function getPackageBySlug($slug)
+    {
+        if (!$slug) {
+            return self::getDefaultPackage();
+        }
+        $packages = self::getShippingPackages();
+        foreach ($packages as $package) {
+            if (isset($package['slug']) && $package['slug'] === $slug) {
+                return $package;
+            }
+        }
+        return self::getDefaultPackage();
+    }
+
+    public static function invoiceSettings($key = false)
+    {
+        $settings = [
+            'invoice_prefix' => 'AS-',
+        ];
+        if (!$key) {
+            return $settings;
+        }
+
+        return Arr::get($settings, $key);
+    }
+
+    public static function getOrderStatuses()
+    {
+        $statuses = [
+            'on-hold'    => __('On Hold', 'fluent-cart'),
+            'processing' => __('Processing', 'fluent-cart'),
+            'completed'  => _x('Completed', 'Order status', 'fluent-cart'),
+            //'archived' => __('Archived', 'fluent-cart'),
+            'cancelled'  => __('Cancelled', 'fluent-cart'),
+        ];
+
+        return apply_filters('fluent_cart/order_statuses', $statuses, []);
+    }
+
+    public static function getEditableOrderStatuses()
+    {
+        $statuses = [
+            'on-hold'    => __('On Hold', 'fluent-cart'),
+            'processing' => __('Processing', 'fluent-cart'),
+            'completed'  => _x('Completed', 'Order status', 'fluent-cart'),
+            //  'archived' => __('Archived', 'fluent-cart'),
+            'cancelled'  => __('Cancelled', 'fluent-cart')
+        ];
+
+        return apply_filters('fluent_cart/editable_order_statuses', $statuses, []);
+    }
+
+    public static function getEditableCustomerStatuses()
+    {
+        $statuses = [
+            'active'   => _x('Active', 'Customer status', 'fluent-cart'),
+            'inactive' => _x('Inactive', 'Customer status', 'fluent-cart'),
+        ];
+
+        return apply_filters('fluent_cart/editable_customer_statuses', $statuses, []);
+    }
+
+    public static function getShippingStatuses()
+    {
+        $statuses = [
+            'unshipped'         => __('Unshipped', 'fluent-cart'),
+            'shipped'           => __('Shipped', 'fluent-cart'),
+            'partially_shipped' => __('Partially Shipped', 'fluent-cart'),
+            'delivered'         => _x('Delivered', 'Shipping status', 'fluent-cart'),
+            'unshippable'       => __('Unshippable', 'fluent-cart'),
+        ];
+
+        return apply_filters('fluent_cart/shipping_statuses', $statuses, []);
+    }
+
+    public static function getEditableShippingStatuses()
+    {
+        $statuses = [
+            'unshipped'   => __('Unshipped', 'fluent-cart'),
+            'shipped'     => __('Shipped', 'fluent-cart'),
+            'delivered'   => _x('Delivered', 'Shipping status', 'fluent-cart'),
+            'unshippable' => __('Unshippable', 'fluent-cart'),
+        ];
+
+        return apply_filters('fluent_cart/editable_shipping_statuses', $statuses, []);
+    }
+
+    public static function getOrderSuccessStatuses()
+    {
+        return [
+            'completed',
+            // 'archived',
+            'processing',
+        ];
+    }
+
+    public static function getOrderFailedStatuses()
+    {
+        return [
+            'failed',
+            //'refunded',
+            'cancelled',
+        ];
+    }
+
+    public static function getTransactionSuccessStatuses()
+    {
+        return [
+            'paid',
+        ];
+    }
+
+    public static function getTransactionStatuses($withLabel = true)
+    {
+        $statuses = [
+            'pending'         => _x('Pending', 'Transaction status', 'fluent-cart'),
+            'paid'            => _x('Paid', 'Transaction status', 'fluent-cart'),
+            'require_capture' => __('Authorized (Require Capture)', 'fluent-cart'),
+            'failed'          => _x('Failed', 'Transaction status', 'fluent-cart'),
+            'refunded'        => _x('Refunded', 'Transaction status', 'fluent-cart'),
+            'active'          => _x('Active', 'Transaction status', 'fluent-cart'),
+        ];
+
+        $statuses = apply_filters('fluent_cart/transaction_statuses', $statuses, []);
+
+        if ($withLabel) {
+            return $statuses;
+        }
+
+        return array_keys($statuses);
+    }
+
+    public static function getEditableTransactionStatuses($withLabel = true)
+    {
+        $statuses = [
+            'pending'  => _x('Pending', 'Transaction status', 'fluent-cart'),
+            'paid'     => _x('Paid', 'Transaction status', 'fluent-cart'),
+            'failed'   => _x('Failed', 'Transaction status', 'fluent-cart'),
+            'refunded' => _x('Refunded', 'Transaction status', 'fluent-cart'),
+        ];
+
+        $statuses = apply_filters('fluent_cart/editable_transaction_statuses', $statuses, []);
+
+        if ($withLabel) {
+            return $statuses;
+        }
+
+        return array_keys($statuses);
+    }
+
+    public static function productStatuses($withLabel = true): array
+    {
+        $statues = [
+            'publish' => __('Publish', 'fluent-cart'),
+            'draft'   => __('Draft', 'fluent-cart'),
+            'future'  => __('Scheduled', 'fluent-cart'),
+            'private' => __('Private', 'fluent-cart'),
+            'trash'   => __('Trashed', 'fluent-cart'),
+        ];
+
+        if ($withLabel) {
+            return $statues;
+        }
+
+        return array_keys($statues);
+    }
+
+    public static function productAdminAllStatuses()
+    {
+        $statuses = self::productStatuses();
+        unset($statuses['trash']);
+        return array_keys($statuses);
+    }
+
+    public static function getCartDriver()
+    {
+        return 'db';
+    }
+
+    /**
+     * Convert an amount to a formatted decimal string.
+     *
+     * @param float $amount The amount to convert. (required)
+     * @param bool $withCurrency Whether to include the currency symbol. (optional, default: true)
+     * @param string|null $currencyCode The currency code to use. (optional, default: null)
+     * @param bool $formatted Whether to format the amount. (optional, default: true)
+     * @param bool $showDecimals Whether to show decimal places. (optional, default: true)
+     * @param bool $thousand_separator Whether to include thousand separators. (optional, default: true)
+     *
+     * @return string The formatted amount.
+     *
+     * @dev Note: If you don't want the thousand separator to be applied,
+     * you need to set $formatted to true and $thousand_separator to false.
+     *
+     * @hook fluent_cart/hide_unnecessary_decimals - Filter to control whether unnecessary decimals (like .00) should be hidden.
+     * Usage: add_filter('fluent_cart/hide_unnecessary_decimals', '__return_true'); // This will show 10 instead of 10.00
+     */
+    public static function toDecimal($amount, $withCurrency = true, $currencyCode = null, $formatted = true, $showDecimals = true, $thousand_separator = true, $withTranslatedDigit = true)
+    {
+        if (!is_numeric($amount)) {
+            return $amount;
+        }
+
+        // Use provided or default currency code
+        if (!$currencyCode) {
+            $currencyCode = self::shopConfig('currency');
+        }
+
+        // Decimal places belong to the currency being rendered, not the store's
+        $decimal = Money::getDecimals($currencyCode);
+
+        // Get currency sign
+        $sign = CurrenciesHelper::getCurrencySign($currencyCode);
+
+        $amount = floatVal($amount / 100);
+
+        // If $showDecimals is false, we override decimal places to 0
+        if (!$showDecimals) {
+            $decimal = 0;
+        }
+
+        // Format the amount based on the decimal configuration
+        if ($formatted) {
+            $decimal_separator = self::shopConfig('decimal_separator') === 'comma' ? ',' : '.';
+
+            $thousand_separator = $decimal_separator === ',' ? '.' : ',';
+
+            // Check if we should hide unnecessary decimal places (e.g., 10.00 -> 10)
+            $hideUnnecessaryDecimals = apply_filters('fluent_cart/hide_unnecessary_decimals', false, [
+                'amount'  => $amount,
+                'decimal' => $decimal
+            ]);
+
+            $amount = number_format(
+                $amount,
+                $decimal,
+                $decimal_separator,
+                $thousand_separator
+            );
+
+            if ($hideUnnecessaryDecimals && $decimal > 0) {
+                // Remove trailing zeros only from the decimal portion
+                $parts = explode($decimal_separator, $amount);
+                if (count($parts) === 2) {
+                    $parts[1] = rtrim($parts[1], '0');
+                    if ($parts[1] === '') {
+                        $amount = $parts[0];
+                    } else {
+                        $amount = $parts[0] . $decimal_separator . $parts[1];
+                    }
+                }
+            }
+
+            if ($withTranslatedDigit) {
+                $amount = self::translateNumber($amount);
+            }
+        }
+
+        // If $withCurrency is false, just return the formatted amount
+        if (!$withCurrency) {
+            return $amount;
+        }
+
+        // Get currency position and return formatted amount with currency
+        $position = self::shopConfig('currency_position');
+
+        switch ($position) {
+            case 'before':
+                return $sign . $amount;
+            case 'after':
+                return $amount . $sign;
+            case 'iso_before':
+                return $currencyCode . ' ' . $amount;
+            case 'iso_after':
+                return $amount . ' ' . $currencyCode;
+            case 'symbool_before_iso':
+                return $sign . $amount . ' ' . $currencyCode;
+            case 'symbool_after_iso':
+                return $currencyCode . ' ' . $amount . $sign;
+            case 'symbool_and_iso':
+                return $currencyCode . ' ' . $sign . $amount;
+            default:
+                return $sign . $amount;
+        }
+    }
+
+    public static function toCent($amount): int
+    {
+        if (!is_numeric($amount)) {
+            return 0;
+        }
+
+        // Round to cents before scaling: 1.005 * 100 is 100.4999..., which PHP 8.4's round() no longer lifts to 101
+        $amount = round(floatval($amount), 2) * 100;
+        $amount = (int)round($amount); // Round to nearest integer, then cast
+        return $amount;
+    }
+
+    /**
+     * Normalize a value that is ALREADY in cents to a whole-cent int.
+     *
+     * Unlike toCent(), this does not scale — use it when the incoming value is a
+     * cents amount that may have arrived as a float. Clients computing cents in
+     * JavaScript send artifacts like 1998.9999999999998 for 1999, and a bare
+     * (int) cast truncates those, silently undercharging by a cent. Non-numeric
+     * input (including the null the request pipeline injects for omitted keys)
+     * normalizes to 0.
+     *
+     * Magnitudes beyond float's exact-integer range (2^53) are REJECTED, not
+     * coerced: is_numeric() accepts exponential notation like 1e19, and casting
+     * that float to int wraps to -8446744073709551616 — a VALID signed BIGINT —
+     * so the corrupt value would persist silently where an un-normalized float
+     * used to fail loudly at MySQL. No real cents amount approaches this bound.
+     */
+    public static function roundCent($amount): int
+    {
+        if (!is_numeric($amount)) {
+            return 0;
+        }
+
+        $amount = (float) $amount;
+
+        if (!is_finite($amount) || $amount > 9.0e15 || $amount < -9.0e15) {
+            throw new \InvalidArgumentException(
+                esc_html('Value is out of the representable cents range: ' . (string) $amount)
+            );
+        }
+
+        return (int) round($amount);
+    }
+
+    public static function toDecimalWithoutComma($amount)
+    {
+
+        if (!is_numeric($amount)) {
+            return 0;
+        }
+
+        // Convert to float and divide by 100
+        $result = floatval($amount) / 100;
+
+        // Ensure exactly two decimal places
+        return round($result, 2);
+    }
+
+    public static function getCustomerByUser($user)
+    {
+        if (is_numeric($user)) {
+            $user = get_user_by('ID', $user);
+        }
+
+        if (!$user) {
+            return null;
+        }
+
+        // Identity only — see CustomerResource::getCurrentCustomer() for why an
+        // email match must never reach a customer row.
+        return Customer::query()->where('user_id', $user->ID)
+            ->orderBy('id', 'ASC')
+            ->first();
+    }
+
+    /**
+     * @param array $order_data
+     *
+     * @return array return ['billing_address','shipping_address','others'];
+     */
+
+    /**
+     *
+     * @return string
+     */
+    public static function getProductImageBaseUri(): string
+    {
+        $uploads = wp_upload_dir();
+
+        return $uploads['baseurl'] . '/' . FLUENTCART_UPLOAD_DIR . '/product_image/';
+    }
+
+    public static function getProductImageBaseDir()
+    {
+        $uploads = wp_upload_dir();
+
+        return $uploads['basedir'] . '/' . FLUENTCART_UPLOAD_DIR . '/product_image/';
+    }
+
+    public static function getAvailableCurrencyList()
+    {
+        $currencies = [
+            'BDT' => [
+                "label"  => __('Bangladeshi Taka', 'fluent-cart'),
+                "value"  => 'BDT',
+                "symbol" => '৳',
+            ],
+            'USD' => [
+                "label"  => __('United State Dollar', 'fluent-cart'),
+                "value"  => 'USD',
+                "symbol" => '$',
+            ],
+            'GBP' => [
+                "label"  => __('United Kingdom', 'fluent-cart'),
+                "value"  => 'GBP',
+                "symbol" => '£',
+            ],
+        ];
+
+        return apply_filters('fluent_cart/available_currencies', $currencies, []);
+    }
+
+    public static function getSymbolForCurrency($currency = 'BDT')
+    {
+
+        $symbol = '৳';
+        $list = self::getAvailableCurrencyList();
+
+        return $list[$currency]['symbol'] ?? $symbol;
+    }
+
+    public function getConfirmationSettings()
+    {
+        return (new Confirmation())->get();
+    }
+
+
+    /**
+     *
+     * @param $remove
+     * @return string
+     */
+    public static function getCheckoutPageLinkAfterRemovingGetParams($remove = [])
+    {
+
+        global $fct_store;
+
+        $link = Arr::get($fct_store, 'checkout_link');
+
+        $link .= '?';
+
+        if (!empty($remove)) {
+            $params = App::request()->all();
+
+            foreach ($params as $key => $val) {
+
+                if (!in_array($key, $remove)) {
+
+                    $link .= $key . '=' . $val . '&';
+                }
+            }
+        }
+
+        return rtrim($link, '&');
+    }
+
+
+    /**
+     *
+     * @return bool
+     */
+    public static function isSingleProductPage(): bool
+    {
+        return is_singular([FluentProducts::CPT_NAME]);
+    }
+
+
+    public static function isTrue($array, $key)
+    {
+        $value = $array[$key] ?? false;
+        if (is_bool($value)) {
+            return $value;
+        }
+        if ($value === 'false' || !$value) {
+            return false;
+        }
+        return true;
+    }
+
+    public static function is_valid_json($string): bool
+    {
+        if (!is_string($string)) {
+            return false;
+        }
+
+        $trimmed = trim($string);
+
+        // Basic check: must start with { or [ and end with } or ]
+        if (!preg_match('/^(\{.*\}|\[.*\])$/s', $trimmed)) {
+            return false;
+        }
+
+        json_decode($trimmed);
+        return json_last_error() === JSON_ERROR_NONE;
+    }
+
+    public static function getStockStatuses($withLabel = true)
+    {
+        $statues = [
+            'in-stock'     => __('In Stock', 'fluent-cart'),
+            'out-of-stock' => __('Out Of Stock', 'fluent-cart'),
+        ];
+
+        if ($withLabel) {
+            return $statues;
+        }
+
+        return array_keys($statues);
+    }
+
+    public static function getFulfilmentTypes($withLabel = true)
+    {
+        $statues = [
+            'physical' => __('Physical', 'fluent-cart'),
+            'digital'  => __('Digital', 'fluent-cart'),
+        ];
+
+        if ($withLabel) {
+            return $statues;
+        }
+
+        return array_keys($statues);
+    }
+
+    public static function getVariationTypes($withLabel = true)
+    {
+        // advanced_variations is advertised in free too so the variation-type
+        // dropdown can offer it (shown Pro-locked with a crown and an upgrade
+        // modal while Pro is inactive). Pro re-registers the same key via the
+        // filter below when active.
+        $types = [
+            'simple'              => __('Simple', 'fluent-cart'),
+            'simple_variations'   => __('Simple Variations', 'fluent-cart'),
+            'advanced_variations' => __('Advanced Variations', 'fluent-cart'),
+        ];
+
+        $types = apply_filters('fluent_cart/variation_types', $types);
+
+        if ($withLabel) {
+            return $types;
+        }
+
+        return array_keys($types);
+    }
+
+    public static function isValueEncrypted($raw_value)
+    {
+        if (!$raw_value || !is_string($raw_value) || !extension_loaded('openssl')) {
+            return false;
+        }
+
+        // Check if input is valid base64
+        if (!preg_match('/^[a-zA-Z0-9\/\r\n+]*={0,2}$/', $raw_value)) {
+            return false;
+        }
+
+        $decoded = base64_decode($raw_value, true);
+        if ($decoded === false) {
+            return false;
+        }
+
+        // Check if decoded string is long enough for IV
+        $method = 'aes-256-ctr';
+        $ivlen = openssl_cipher_iv_length($method);
+        if (strlen($decoded) < $ivlen) {
+            return false;
+        }
+
+        $iv = substr($decoded, 0, $ivlen);
+        $ciphertext = substr($decoded, $ivlen);
+
+        $key = (defined('FLUENT_CART_ENCRYPTION_KEY'))
+            ? FLUENT_CART_ENCRYPTION_KEY
+            : ((defined('LOGGED_IN_KEY') && '' !== LOGGED_IN_KEY)
+                ? LOGGED_IN_KEY
+                : 'this-is-a-fallback-key-but-not-secure');
+        $salt = (defined('LOGGED_IN_SALT') && '' !== LOGGED_IN_SALT)
+            ? LOGGED_IN_SALT
+            : 'this-is-a-fallback-salt-but-not-secure';
+
+        $value = openssl_decrypt($ciphertext, $method, $key, 0, $iv);
+        if ($value === false) {
+            return false;
+        }
+
+
+        return substr($value, -strlen($salt)) === $salt;
+    }
+
+    public static function encryptKey($value)
+    {
+        if (!$value) {
+            return $value;
+        }
+
+        if (!extension_loaded('openssl')) {
+            return $value;
+        }
+
+        if (self::isValueEncrypted($value)) {
+            return $value;
+        }
+
+        $salt = (defined('LOGGED_IN_SALT') && '' !== LOGGED_IN_SALT) ? LOGGED_IN_SALT : 'this-is-a-fallback-salt-but-not-secure';
+
+        if (defined('FLUENT_CART_ENCRYPTION_KEY')) {
+            $key = FLUENT_CART_ENCRYPTION_KEY;
+        } else {
+            $key = (defined('LOGGED_IN_KEY') && '' !== LOGGED_IN_KEY) ? LOGGED_IN_KEY : 'this-is-a-fallback-key-but-not-secure';
+        }
+
+        $method = 'aes-256-ctr';
+        $ivlen = openssl_cipher_iv_length($method);
+        $iv = openssl_random_pseudo_bytes($ivlen);
+
+        $raw_value = openssl_encrypt($value . $salt, $method, $key, 0, $iv);
+        if (!$raw_value) {
+            return false;
+        }
+
+        return base64_encode($iv . $raw_value); // phpcs:ignore WordPress.PHP.DiscouragedPHPFunctions.obfuscation_base64_encode
+    }
+
+    public static function decryptKey($raw_value)
+    {
+
+        if (!$raw_value) {
+            return $raw_value;
+        }
+
+        if (!extension_loaded('openssl')) {
+            return $raw_value;
+        }
+
+        $decoded = base64_decode($raw_value, true); // phpcs:ignore WordPress.PHP.DiscouragedPHPFunctions.obfuscation_base64_decode
+
+        if ($decoded === false) {
+            return $raw_value;
+        }
+
+        $method = 'aes-256-ctr';
+        $ivlen = openssl_cipher_iv_length($method);
+
+        if (strlen($decoded) <= $ivlen) {
+            return $raw_value;
+        }
+
+        $iv = substr($decoded, 0, $ivlen);
+
+        $ciphertext = substr($decoded, $ivlen);
+
+        if (defined('FLUENT_CART_ENCRYPTION_KEY')) {
+            $key = FLUENT_CART_ENCRYPTION_KEY;
+        } else {
+            $key = (defined('LOGGED_IN_KEY') && '' !== LOGGED_IN_KEY) ? LOGGED_IN_KEY : 'this-is-a-fallback-key-but-not-secure';
+        }
+
+        $salt = (defined('LOGGED_IN_SALT') && '' !== LOGGED_IN_SALT) ? LOGGED_IN_SALT : 'this-is-a-fallback-salt-but-not-secure';
+
+        $decrypted = openssl_decrypt($ciphertext, $method, $key, 0, $iv);
+        if (!$decrypted || substr($decrypted, -strlen($salt)) !== $salt) {
+            return false;
+        }
+
+        return substr($decrypted, 0, -strlen($salt));
+    }
+
+    /**
+     * @return array
+     * For kses_post to allow some html tags
+     */
+    public static function allowedHTMLForCheckout(): array
+    {
+
+        $allowedTags = [
+            'svg'   => [
+                'class'           => true,
+                'aria-hidden'     => true,
+                'aria-labelledby' => true,
+                'role'            => true,
+                'xmlns'           => true,
+                'width'           => true,
+                'height'          => true,
+                'viewbox'         => true,
+                'fill'            => true
+            ],
+            'g'     => [
+                'fill' => true
+            ],
+            'title' => ['title' => true],
+            'path'  => [
+                'd'         => true,
+                'fill'      => true,
+                'stroke'    => true,
+                'fill-rule' => true,
+                'clip-rule' => true,
+            ],
+        ];
+
+        foreach (['input', 'label', 'div', 'span', 'p', 'select', 'option', 'textarea', 'button', 'form', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6'] as $tag) {
+            $allowedTags[$tag] = [
+                'selected',
+                'type'                                                                              => [],
+                "selected='selected'"                                                               => [],
+                'name'                                                                              => [],
+                'value'                                                                             => [],
+                'autocomplete'                                                                      => [],
+                'placeholder'                                                                       => [],
+                'data-required'                                                                     => [],
+                'data-type'                                                                         => [],
+                'id'                                                                                => [],
+                'class'                                                                             => [],
+                'required'                                                                          => [],
+                'disabled'                                                                          => [],
+                'for'                                                                               => [],
+                'style'                                                                             => [],
+                'checked'                                                                           => [],
+                'maxlength'                                                                         => [],
+                'data-id'                                                                           => [],
+                'data-country'                                                                      => [],
+                'data-fluent-cart-checkout-page-form-address-modal-open-button'                     => [],
+                'data-fluent-cart-checkout-page-form-address-modal-wrapper'                         => [],
+                'data-fluent-cart-checkout-page-form-input-wrapper'                                 => [],
+                'data-fluent_cart_checkout_error'                                                   => [],
+                'data-fluent-cart-checkout-page-form-address-modal-body'                            => [],
+                'data-fluent-cart-checkout-page-form-address-modal-address-selector-button'         => [],
+                'data-fluent-cart-checkout-page-form-address-input'                                 => [],
+                'data-fluent-cart-checkout-page-form-address-select-wrapper'                        => [],
+                'data-fluent-cart-checkout-page-form-address-modal-close-button'                    => [],
+                'data-fluent-cart-checkout-page-form-address-modal-address-selector-button-wrapper' => [],
+                'data-fluent-cart-checkout-page-form-address-show-add-new-modal-button'             => [],
+                'data-fluent-cart-checkout-page-form-address-modal-apply-button'                    => [],
+                'data-fluent-cart-checkout-page-form-address-show-add-new-modal-form-wrapper'       => [],
+                'data-fluent-cart-checkout-page-form-address-show-add-new-modal-submit-button'      => [],
+                'data-fluent-cart-checkout-page-form-address-show-add-new-modal-cancel-button'      => [],
+                'data-fluent-cart-address-type'                                                     => [],
+                'data-fluent-cart-checkout-page-form-address-info-wrapper'                          => [],
+                'data-fluent-cart-checkout-page-form-error'                                         => [],
+                'data-fluent-cart-checkout-page-form-section'                                       => [],
+                'data-fluent-cart-checkout-page-discount-container'                                 => [],
+                'data-fluent-cart-checkout-page-final-amount-container'                             => [],
+                'data-fluent-cart-checkout-page-new-total-amount'                                   => [],
+                'data-fluent-cart-checkout-page-final-amount'                                       => [],
+                'data-fluent-cart-checkout-page-coupon-validate'                                    => [],
+                'data-fluent-cart-checkout-coupon-items-toggle'                                     => [],
+                'data-fluent-cart-checkout-coupon-items-wrapper'                                    => []
+
+
+            ];
+        }
+
+        return $allowedTags;
+    }
+
+    public static function getCouponStatuses()
+    {
+        $statuses = [
+            'active'   => _x('Active', 'Coupon status', 'fluent-cart'),
+            'expired'  => _x('Expired', 'Coupon status', 'fluent-cart'),
+            'disabled' => _x('Disabled', 'Coupon status', 'fluent-cart'),
+        ];
+
+        return apply_filters('fluent_cart/coupon_statuses', $statuses, []);
+    }
+
+    public static function getCouponSuccessStatuses()
+    {
+        return [
+            'active'
+        ];
+    }
+
+
+    /**
+     * Compact subscription terms as text
+     *
+     * Expected $data keys:
+     * - trial_days (int)
+     * - interval ('daily'|'weekly'|'monthly'|'yearly')
+     * - interval_count (int, default 1)
+     * - times (int; 0 = open-ended, >0 = finite number of payments/cycles)
+     * - price (string; formatted with currency)
+     * - signup_fee (string; 0 if none)
+     * - compare_price (string; 0 if none)
+     *
+     * Output examples:
+     * - "30 days free then $100.00 per year"
+     * - "$100 per year + $10 one-time signup fee"
+     * - "$100/month for 4 months"
+     * - "30 days free then $100/month for 4 months"
+     * - "$99 per month"
+     */
+    public static function getSubscriptionTermText(array $data, $asHtml = false): string
+    {
+        // Fixed interval options
+        $intervalOptions = static::getAvailableSubscriptionIntervalMaps();
+
+        // Normalize / defaults
+        $trialDays = $data['trial_days'] ?? 0;
+        $interval = (string)($data['interval'] ? $data['interval'] : 'monthly');
+
+        $unit = '';
+        if (isset($intervalOptions[$interval])) {
+            $unit = $intervalOptions[$interval];
+        } else if ($interval) {
+            $intervalOptions = static::getAvailableSubscriptionIntervalOptions();
+            foreach ($intervalOptions as $option) {
+                if ($option['value'] === $interval) {
+                    $unit = strtolower($option['label']);
+                    break;
+                }
+            }
+
+            if (!$unit) {
+                $unit = strtolower(str_replace(['_', '-'], ' ', $interval));
+            }
+        }
+
+        if (!$unit) {
+            $unit = 'year';
+        }
+
+        $count = max(1, (int)($data['interval_count'] ?? 1));
+        $times = (int)($data['times'] ?? 0);
+        $price = (string)($data['price'] ?? '');
+        $signupFee = $data['signup_fee'] ?? '';
+        $compare = $data['compare_price'] ?? '';
+
+        $signupFeeLabel = $data['signup_fee_label'] ?? __('signup fee', 'fluent-cart');
+
+        // helpers
+        $pluralUnit = static function (string $unit, int $n): string {
+            switch ($unit) {
+                case 'day':
+                    return _n('day', 'days', $n, 'fluent-cart');
+                case 'week':
+                    return _n('week', 'weeks', $n, 'fluent-cart');
+                case 'quarter':
+                    return _n('quarter', 'quarters', $n, 'fluent-cart');
+                case 'half_year':
+                    return _n('six month', 'six months', $n, 'fluent-cart');
+                case 'year':
+                    return _n('year', 'years', $n, 'fluent-cart');
+                case 'month':
+                    return _n('month', 'months', $n, 'fluent-cart');
+                default:
+                    // For custom intervals, add 's' for plural
+                    return ($n > 1) ? $unit . 's' : $unit;
+            }
+        };
+
+        // Build the “per …” phrase (e.g., "per month", "per 3 months")
+        $perPhrase = ($count === 1)
+            ? sprintf(
+            /* translators: %s is the singular unit name (e.g., day, month, year) */
+                __('per %s', 'fluent-cart'),
+                $pluralUnit($unit, 1)
+            )
+            : sprintf(
+            /* translators: %1$d is the count number, %2$s is the plural unit name (e.g., days, months, years) */
+                __('per %1$d %2$s', 'fluent-cart'),
+                $count,
+                $pluralUnit($unit, $count)
+            );
+
+        // Main price phrase:
+        // - If monthly installments (times > 0 and unit == month and count == 1): "$X/month for N months"
+        // - Else if times > 0: "$X per {count unit(s)} for N {cycle(s)}"
+        // - Else: "$X per {count unit(s)}"
+        if ($times > 0) {
+            if ($unit === 'month' && $count === 1) {
+                $installmentTail = sprintf(
+                /* translators: %s: pluralized 'month(s)' */
+                    __('for %1$d %2$s', 'fluent-cart'),
+                    $times,
+                    $pluralUnit('month', $times)
+                );
+                $main = sprintf(
+                /* translators: Compact monthly installment, e.g. "$100/month for 4 months" */
+                    __('%1$s/%2$s %3$s', 'fluent-cart'),
+                    $price,
+                    __('month', 'fluent-cart'),
+                    $installmentTail
+                );
+            } else {
+                // Generic installment wording: "for N cycle(s)"
+                $cyclesTail = sprintf(
+                /* translators: %1$d is the number of cycles, %2$s is "cycle" or "cycles" */
+                    __('for %1$d %2$s', 'fluent-cart'),
+                    $times,
+                    _n('cycle', 'cycles', $times, 'fluent-cart')
+                );
+                $main = sprintf(
+                /* translators: e.g. "$100 per 3 months for 4 cycles" */
+                    __('%1$s %2$s %3$s', 'fluent-cart'),
+                    $price,
+                    $perPhrase,
+                    $cyclesTail
+                );
+            }
+        } else {
+            // Open-ended subscription
+            $main = sprintf(
+            /* translators: e.g. "$99 per month" */
+                __('%1$s %2$s', 'fluent-cart'),
+                $price,
+                $perPhrase
+            );
+        }
+
+        // Prefix trial if present: "N days free then …"
+        if ($trialDays > 0) {
+            $main = sprintf(
+            /* translators: e.g. "30 days free then $100 per month". 1: trial day count, 2: "day" or "days", 3: the recurring price phrase */
+                __('%1$d %2$s free then %3$s', 'fluent-cart'),
+                $trialDays,
+                $pluralUnit('day', $trialDays),
+                $main
+            );
+        }
+
+        // Append signup fee if any: " + $10 one-time signup fee"
+        if ($signupFee) {
+            $main = sprintf(
+            /* translators: e.g. "$100 per month + $10 one-time signup fee". 1: the price phrase, 2: signup fee amount, 3: signup fee name */
+                __('%1$s + %2$s one-time %3$s', 'fluent-cart'),
+                $main,
+                $signupFee,
+                $signupFeeLabel
+            );
+        }
+
+        // No trailing period (matches your examples)
+        return $main;
+    }
+
+    public static function getTranslatedIntervalUnit(string $unit): string
+    {
+        switch ($unit) {
+            case 'day':
+                return __('day', 'fluent-cart');
+            case 'week':
+                return __('week', 'fluent-cart');
+            case 'month':
+                return __('month', 'fluent-cart');
+            case 'quarter':
+                return __('quarter', 'fluent-cart');
+            case 'half_year':
+                return __('six month', 'fluent-cart');
+            case 'year':
+                return __('year', 'fluent-cart');
+            default:
+                return $unit;
+        }
+    }
+
+    public static function getTranslatedIntervalUnitPlural(string $unit, int $count): string
+    {
+        switch ($unit) {
+            case 'day':
+                return _n('day', 'days', $count, 'fluent-cart');
+            case 'week':
+                return _n('week', 'weeks', $count, 'fluent-cart');
+            case 'month':
+                return _n('month', 'months', $count, 'fluent-cart');
+            case 'quarter':
+                return _n('quarter', 'quarters', $count, 'fluent-cart');
+            case 'half_year':
+                return _n('six month', 'six months', $count, 'fluent-cart');
+            case 'year':
+                return _n('year', 'years', $count, 'fluent-cart');
+            default:
+                return $unit;
+        }
+    }
+
+    public static function generateSubscriptionInfo($otherInfo, $itemPrice, $currencyCode = null): ?string
+    {
+        // Convert to array only if it's an object
+        if (is_object($otherInfo)) {
+            $otherInfo = json_decode(json_encode($otherInfo), true);
+        }
+
+        $price = self::toDecimal($itemPrice, true, $currencyCode);
+        $recurringDiscountAmount = Arr::get($otherInfo, 'recurring_discounts.amount', 0);
+
+        if ($recurringDiscountAmount) {
+            $newRecurringAmount = $itemPrice - $recurringDiscountAmount;
+            $price = "<del>" . $price . "</del> " . self::toDecimal($newRecurringAmount, true, $currencyCode);
+        }
+
+        $repeatInterval = Arr::get($otherInfo, 'repeat_interval', '');
+        $occurrence = (int)Arr::get($otherInfo, 'times', 0);
+
+        $intervalOptions = static::getAvailableSubscriptionIntervalMaps();
+
+        $intervalUnit = '';
+        if (isset($intervalOptions[$repeatInterval])) {
+            $intervalUnit = $intervalOptions[$repeatInterval];
+        } else if ($repeatInterval) {
+            $intervalOptions = static::getAvailableSubscriptionIntervalOptions();
+            foreach ($intervalOptions as $option) {
+                if ($option['value'] === $repeatInterval) {
+                    $intervalUnit = strtolower($option['label']);
+                    break;
+                }
+            }
+
+            if (!$intervalUnit) {
+                $intervalUnit = ucwords(str_replace(['_', '-'], ' ', $repeatInterval));
+            }
+        }
+
+        $intervalLabel = Helper::getTranslatedIntervalUnit($intervalUnit);
+
+        $interval = $intervalUnit
+            ? sprintf(
+            /* translators: %s is the interval (e.g., day, week, month, quarter, half_year, year) */
+                __('per %s', 'fluent-cart'),
+                $intervalLabel
+            )
+            : '';
+
+        $time = $intervalUnit
+            ? static::getTranslatedIntervalUnitPlural($intervalUnit, $occurrence)
+            : '';
+
+        $paymentInfo = sprintf(
+        /* translators: %1$s is the price, %2$s is the interval, %3$s is the occurrence count, %4$s is the pluralized interval unit (e.g. months) */
+            __('%1$s %2$s, for %3$s %4$s', 'fluent-cart'),
+            $price,
+            $interval,
+            $occurrence,
+            $time
+        );
+
+        if (empty($occurrence)) {
+            $paymentInfo = sprintf(
+            /* translators: %1$s is the price, %2$s is the interval, %3$s is "until cancel" text */
+                __('%1$s %2$s %3$s', 'fluent-cart'),
+                $price,
+                $interval,
+                __('until cancel', 'fluent-cart')
+            );
+        }
+
+        return !empty($otherInfo) ? $paymentInfo : null;
+    }
+
+    /**
+     * Billing-cycle text for a subscription with a config-defined schedule
+     * (see SubscriptionHelper::getBillingSchedule()) — cadences the
+     * billing_interval enum cannot express, e.g. "$100 per 3 years on Aug 19".
+     * Subscriptions without a schedule keep generateSubscriptionInfo().
+     */
+    public static function generateScheduleSubscriptionInfo(array $schedule, $otherInfo, $itemPrice, $currencyCode = null): ?string
+    {
+        if (is_object($otherInfo)) {
+            $otherInfo = json_decode(json_encode($otherInfo), true);
+        }
+
+        $count = max(1, (int) Arr::get($schedule, 'interval', 1));
+
+        switch (Arr::get($schedule, 'period')) {
+            case 'day':
+                $unitLabel = _n('day', 'days', $count, 'fluent-cart');
+                break;
+            case 'week':
+                $unitLabel = _n('week', 'weeks', $count, 'fluent-cart');
+                break;
+            case 'month':
+                $unitLabel = _n('month', 'months', $count, 'fluent-cart');
+                break;
+            case 'year':
+                $unitLabel = _n('year', 'years', $count, 'fluent-cart');
+                break;
+            default:
+                return self::generateSubscriptionInfo($otherInfo, $itemPrice, $currencyCode);
+        }
+
+        $price = self::toDecimal($itemPrice, true, $currencyCode);
+        $recurringDiscountAmount = Arr::get($otherInfo, 'recurring_discounts.amount', 0);
+
+        if ($recurringDiscountAmount) {
+            $newRecurringAmount = $itemPrice - $recurringDiscountAmount;
+            $price = "<del>" . $price . "</del> " . self::toDecimal($newRecurringAmount, true, $currencyCode);
+        }
+
+        $interval = $count === 1
+            ? sprintf(
+            /* translators: %s is the interval unit (e.g., day, week, month, year) */
+                __('per %s', 'fluent-cart'),
+                $unitLabel
+            )
+            : sprintf(
+            /* translators: %1$d is the count number, %2$s is the plural unit name (e.g., days, months, years) */
+                __('per %1$d %2$s', 'fluent-cart'),
+                $count,
+                $unitLabel
+            );
+
+        if ($anchorText = self::getScheduleAnchorText($schedule['period'], Arr::get($schedule, 'anchor', []))) {
+            $interval .= ' ' . $anchorText;
+        }
+
+        $occurrence = (int) Arr::get($otherInfo, 'times', 0);
+
+        if (empty($occurrence)) {
+            return sprintf(
+            /* translators: %1$s is the price, %2$s is the interval, %3$s is "until cancel" text */
+                __('%1$s %2$s %3$s', 'fluent-cart'),
+                $price,
+                $interval,
+                __('until cancel', 'fluent-cart')
+            );
+        }
+
+        return sprintf(
+        /* translators: %1$s is the price, %2$s is the interval, %3$s is the occurrence count, %4$s is "cycle(s)" */
+            __('%1$s %2$s, for %3$s %4$s', 'fluent-cart'),
+            $price,
+            $interval,
+            $occurrence,
+            _n('cycle', 'cycles', $occurrence, 'fluent-cart')
+        );
+    }
+
+    /**
+     * Human-readable billing anchor, e.g. "on Friday", "on the 10th",
+     * "on the last day", "on Aug 19". Anchor day 31 encodes "last day of
+     * the month" (see SubscriptionHelper::getBillingSchedule()).
+     */
+    private static function getScheduleAnchorText(string $period, $anchor): string
+    {
+        if (!is_array($anchor) || !$anchor) {
+            return '';
+        }
+
+        if ($period === 'week' && !empty($anchor['weekday'])) {
+            $weekdays = [
+                1 => __('Monday', 'fluent-cart'),
+                2 => __('Tuesday', 'fluent-cart'),
+                3 => __('Wednesday', 'fluent-cart'),
+                4 => __('Thursday', 'fluent-cart'),
+                5 => __('Friday', 'fluent-cart'),
+                6 => __('Saturday', 'fluent-cart'),
+                7 => __('Sunday', 'fluent-cart'),
+            ];
+
+            if (isset($weekdays[$anchor['weekday']])) {
+                /* translators: %1$s is a weekday name, e.g. "on Friday" */
+                return sprintf(_x('on %1$s', 'subscription billing day', 'fluent-cart'), $weekdays[$anchor['weekday']]);
+            }
+
+            return '';
+        }
+
+        if ($period === 'month' && !empty($anchor['day'])) {
+            $day = (int) $anchor['day'];
+
+            if ($day === 31) {
+                return __('on the last day', 'fluent-cart');
+            }
+
+            /* translators: %1$s is an ordinal day of month, e.g. "on the 10th" */
+            return sprintf(_x('on the %1$s', 'subscription billing day', 'fluent-cart'), self::ordinalDay($day));
+        }
+
+        if ($period === 'year' && (!empty($anchor['day']) || !empty($anchor['month']))) {
+            $day   = (int) Arr::get($anchor, 'day', 0);
+            $month = (int) Arr::get($anchor, 'month', 0);
+
+            if ($month && $day) {
+                // Store format keeps the locale's field order ("16. Aug" in German).
+                // 2000 is a leap year, so Feb 29 renders.
+                /* translators: %1$s is a date without the year, e.g. "on Aug 19" */
+                return sprintf(_x('on %1$s', 'subscription billing day', 'fluent-cart'), wp_date(DateFormatter::shortDateFormat(), gmmktime(12, 0, 0, $month, $day, 2000), new \DateTimeZone('UTC')));
+            }
+
+            if ($month) {
+                /* translators: %s is a month name, e.g. "in August" */
+                return sprintf(__('in %s', 'fluent-cart'), wp_date('F', gmmktime(12, 0, 0, $month, 1, 2001), new \DateTimeZone('UTC')));
+            }
+
+            /* translators: %1$s is an ordinal day of month, e.g. "on the 10th" */
+            return sprintf(_x('on the %1$s', 'subscription billing day', 'fluent-cart'), self::ordinalDay($day));
+        }
+
+        return '';
+    }
+
+    // gmdate('jS') hard-codes the English suffix, so each suffix is its own msgid.
+    private static function ordinalDay(int $day): string
+    {
+        switch (gmdate('S', gmmktime(12, 0, 0, 1, $day, 2001))) {
+            case 'st':
+                /* translators: %d: day of month, e.g. "1st", "21st" */
+                return sprintf(_x('%dst', 'ordinal day of month', 'fluent-cart'), $day);
+            case 'nd':
+                /* translators: %d: day of month, e.g. "2nd", "22nd" */
+                return sprintf(_x('%dnd', 'ordinal day of month', 'fluent-cart'), $day);
+            case 'rd':
+                /* translators: %d: day of month, e.g. "3rd", "23rd" */
+                return sprintf(_x('%drd', 'ordinal day of month', 'fluent-cart'), $day);
+            default:
+                /* translators: %d: day of month, e.g. "4th", "11th" */
+                return sprintf(_x('%dth', 'ordinal day of month', 'fluent-cart'), $day);
+        }
+    }
+
+    public static function generateSetupFeeInfo($otherInfo, $asArray = false, $currencyCode = null)
+    {
+        // Convert to array if it's an object
+        if (is_object($otherInfo)) {
+            $otherInfo = json_decode(json_encode($otherInfo), true);
+        }
+
+        $signupFeeName = Arr::get($otherInfo, 'signup_fee_name', __('Setup Fee', 'fluent-cart'));
+        $fee = Arr::get($otherInfo, 'signup_fee', 0);
+        $manageSetupFee = Arr::get($otherInfo, 'manage_setup_fee', 'no');
+
+        if ($manageSetupFee !== 'yes' || !$fee) {
+            return '';
+        }
+
+
+        if ($originalSetupFee = Arr::get($otherInfo, 'original_signup_fee', 0)) {
+            if ($fee != $originalSetupFee) {
+                $title = __('Adjusted setup fee', 'fluent-cart');
+                $formattedAmount = CurrencySettings::getPriceHtml($fee, $currencyCode, true, true);
+
+                if ($asArray) {
+                    return [
+                        'signup_fee_name'      => $title,
+                        'signup_fee'           => $fee,
+                        'signup_fee_formatted' => $formattedAmount,
+                    ];
+                }
+                return $title . $formattedAmount;
+            }
+        }
+
+        $formattedAmount = CurrencySettings::getPriceHtml($fee, $currencyCode, true, true);
+        if ($asArray) {
+            return [
+                'signup_fee_name'      => $signupFeeName,
+                'signup_fee'           => $fee,
+                'signup_fee_formatted' => $formattedAmount,
+            ];
+        }
+
+
+        return $signupFeeName . ' ' . $formattedAmount;
+    }
+
+    public static function generateTrialInfo($otherInfo)
+    {
+        $trialInfo = '';
+
+        $trialDays = Arr::get($otherInfo, 'trial_days', 0);
+
+        if ($trialDays && Arr::get($otherInfo, 'is_trial_days_simulated', 'no') !== 'yes') {
+            $trialInfo = sprintf(
+            /* translators: %d is the number of trial days */
+                _n('Free Trial: %d day', 'Free Trial: %d days', (int) $trialDays, 'fluent-cart'),
+                $trialDays
+            );
+        }
+
+        return apply_filters('fluent_cart/trial_info', $trialInfo, $otherInfo);
+    }
+
+
+    public static function getCountryList(): array
+    {
+        $options = App::getInstance('localization')->countriesOptions();
+
+        return apply_filters('fluent_cart/util/countries', $options, []);
+    }
+
+    public static function getCountyIsoLists(): array
+    {
+        return App::getInstance('localization')->getCountyIsoLists();
+    }
+
+    public static function getCountryCode($country_name)
+    {
+        $countries = self::getCountryList();
+        foreach ($countries as $country) {
+            if ($country['name'] === $country_name) {
+                return $country['value'];
+            }
+        }
+        return '';
+    }
+
+    /**
+     * Get the country's name with country code,
+     *
+     * @param $code
+     * @return string
+     */
+    public static function getCountryName($code): string
+    {
+        if (!$code || !is_string($code)) {
+            return '';
+        }
+
+        $countries = self::getCountyIsoLists();
+
+        return $countries[$code] ?? $code;
+    }
+
+    public static function languageCodes(): array
+    {
+        return $langCodes = [
+            'AF' => 'fa-AF',
+            'AL' => 'sq-AL',
+            'DZ' => 'ar-DZ',
+            'AS' => 'sm-AS',
+            'AD' => 'ca-AD',
+            'AO' => 'pt-AO',
+            'AR' => 'es-AR',
+            'AM' => 'hy-AM',
+            'AU' => 'en-AU',
+            'AT' => 'de-AT',
+            'AZ' => 'az-AZ',
+            'BH' => 'ar-BH',
+            'BD' => 'bn-BD',
+            'BY' => 'be-BY',
+            'BE' => 'nl-BE',
+            'BZ' => 'en-BZ',
+            'BJ' => 'fr-BJ',
+            'BT' => 'dz-BT',
+            'BO' => 'es-BO',
+            'BA' => 'bs-BA',
+            'BW' => 'en-BW',
+            'BR' => 'pt-BR',
+            'BN' => 'ms-BN',
+            'BG' => 'bg-BG',
+            'BF' => 'fr-BF',
+            'BI' => 'fr-BI',
+            'KH' => 'km-KH',
+            'CM' => 'en-CM',
+            'CA' => 'en-CA',
+            'CV' => 'pt-CV',
+            'CF' => 'fr-CF',
+            'TD' => 'fr-TD',
+            'CL' => 'es-CL',
+            'CN' => 'zh-CN',
+            'CO' => 'es-CO',
+            'KM' => 'ar-KM',
+            'CD' => 'fr-CD',
+            'CG' => 'fr-CG',
+            'CR' => 'es-CR',
+            'CI' => 'fr-CI',
+            'HR' => 'hr-HR',
+            'CU' => 'es-CU',
+            'CY' => 'el-CY',
+            'CZ' => 'cs-CZ',
+            'DK' => 'da-DK',
+            'DJ' => 'fr-DJ',
+            'DM' => 'en-DM',
+            'DO' => 'es-DO',
+            'EC' => 'es-EC',
+            'EG' => 'ar-EG',
+            'SV' => 'es-SV',
+            'GQ' => 'es-GQ',
+            'ER' => 'ti-ER',
+            'EE' => 'et-EE',
+            'ET' => 'am-ET',
+            'FJ' => 'en-FJ',
+            'FI' => 'fi-FI',
+            'FR' => 'fr-FR',
+            'GA' => 'fr-GA',
+            'GM' => 'en-GM',
+            'GE' => 'ka-GE',
+            'DE' => 'de-DE',
+            'GH' => 'en-GH',
+            'GR' => 'el-GR',
+            'GD' => 'en-GD',
+            'GT' => 'es-GT',
+            'GN' => 'fr-GN',
+            'GW' => 'pt-GW',
+            'GY' => 'en-GY',
+            'HT' => 'fr-HT',
+            'HN' => 'es-HN',
+            'HU' => 'hu-HU',
+            'IS' => 'is-IS',
+            'IN' => 'hi-IN',
+            'ID' => 'id-ID',
+            'IR' => 'fa-IR',
+            'IQ' => 'ar-IQ',
+            'IE' => 'en-IE',
+            'IL' => 'he-IL',
+            'IT' => 'it-IT',
+            'JM' => 'en-JM',
+            'JP' => 'ja-JP',
+            'JO' => 'ar-JO',
+            'KZ' => 'kk-KZ',
+            'KE' => 'sw-KE',
+            'KI' => 'en-KI',
+            'KR' => 'ko-KR',
+            'KW' => 'ar-KW',
+            'KG' => 'ky-KG',
+            'LA' => 'lo-LA',
+            'LV' => 'lv-LV',
+            'LB' => 'ar-LB',
+            'LS' => 'en-LS',
+            'LR' => 'en-LR',
+            'LY' => 'ar-LY',
+            'LI' => 'de-LI',
+            'LT' => 'lt-LT',
+            'LU' => 'lb-LU',
+            'MG' => 'mg-MG',
+            'MW' => 'en-MW',
+            'MY' => 'ms-MY',
+            'MV' => 'dv-MV',
+            'ML' => 'fr-ML',
+            'MT' => 'mt-MT',
+            'MH' => 'mh-MH',
+            'MR' => 'ar-MR',
+            'MU' => 'mfe-MU',
+            'MX' => 'es-MX',
+            'FM' => 'en-FM',
+            'MD' => 'ro-MD',
+            'MC' => 'fr-MC',
+            'MN' => 'mn-MN',
+            'ME' => 'sr-ME',
+            'MA' => 'ar-MA',
+            'MZ' => 'pt-MZ',
+            'NA' => 'en-NA',
+            'NR' => 'en-NR',
+            'NP' => 'ne-NP',
+            'NL' => 'nl-NL',
+            'NZ' => 'en-NZ',
+            'NI' => 'es-NI',
+            'NG' => 'en-NG',
+            'NO' => 'no-NO',
+            'OM' => 'ar-OM',
+            'PK' => 'ur-PK',
+            'PW' => 'en-PW',
+            'PA' => 'es-PA',
+            'PG' => 'en-PG',
+            'PY' => 'es-PY',
+            'PE' => 'es-PE',
+            'PH' => 'en-PH',
+            'PL' => 'pl-PL',
+            'PT' => 'pt-PT',
+            'QA' => 'ar-QA',
+            'RO' => 'ro-RO',
+            'RU' => 'ru-RU',
+            'RW' => 'rw-RW',
+            'WS' => 'sm-WS',
+            'SM' => 'it-SM',
+            'SA' => 'ar-SA',
+            'SN' => 'fr-SN',
+            'RS' => 'sr-RS',
+            'SC' => 'fr-SC',
+            'SL' => 'en-SL',
+            'SG' => 'en-SG',
+            'SK' => 'sk-SK',
+            'SI' => 'sl-SI',
+            'SB' => 'en-SB',
+            'SO' => 'so-SO',
+            'ZA' => 'en-ZA',
+            'ES' => 'es-ES',
+            'LK' => 'si-LK',
+            'SD' => 'ar-SD',
+            'SR' => 'nl-SR',
+            'SZ' => 'en-SZ',
+            'SE' => 'sv-SE',
+            'CH' => 'de-CH',
+            'SY' => 'ar-SY',
+            'TW' => 'zh-TW',
+            'TJ' => 'tg-TJ',
+            'TZ' => 'sw-TZ',
+            'TH' => 'th-TH',
+            'TL' => 'pt-TL',
+            'TG' => 'fr-TG',
+            'TO' => 'to-TO',
+            'TT' => 'en-TT',
+            'TN' => 'ar-TN',
+            'TR' => 'tr-TR',
+            'TM' => 'tk-TM',
+            'TV' => 'en-TV',
+            'UG' => 'en-UG',
+            'UA' => 'uk-UA',
+            'AE' => 'ar-AE',
+            'GB' => 'en-GB',
+            'US' => 'en-US',
+            'UY' => 'es-UY',
+            'UZ' => 'uz-UZ',
+            'VU' => 'bi-VU',
+            'VE' => 'es-VE',
+            'VN' => 'vi-VN',
+            'YE' => 'ar-YE',
+            'ZM' => 'en-ZM',
+            'ZW' => 'en-ZW'
+        ];
+    }
+
+    /**
+     * Returns a translatable string with a shortcode inserted in the correct format.
+     *
+     * @param string $shortcode The shortcode to be inserted (e.g., '[fluent_cart_receipt]').
+     * @return string The formatted translatable string.
+     */
+    public static function getShortcodeInstructionString(string $shortcode, $pageName = ''): string
+    {
+        $copyToClipboard = __('Copy to clipboard', 'fluent-cart');
+        return sprintf(
+        /* translators: %s: Shortcode */
+            '<p>' . _x('Use %1$s shortcode in your page.', 'Shortcode instruction message', 'fluent-cart') . '</p>',
+            '<code class="copyable-content" title="' . $copyToClipboard . '">' . ($shortcode) . '</code>',
+        //$pageName
+        );
+    }
+
+
+    /**
+     * Get the current user Model.
+     * @return User|\FluentCart\Framework\Database\Orm\Builder|\FluentCart\Framework\Database\Orm\Builder[]|\FluentCart\Framework\Database\Orm\Collection|\FluentCart\Framework\Database\Orm\Model|null
+     */
+    public static function getCurrentUser($refresh = false)
+    {
+        static $user = false;
+
+        if (!$refresh && $user !== false) {
+            return $user;
+        }
+
+        $userId = get_current_user_id();
+        if (!$userId) {
+            $user = null;
+            return $user;
+        }
+
+        $user = User::query()->find($userId);
+
+        return $user;
+
+    }
+
+    public static function hasLicense($product): bool
+    {
+        if (empty($product)) {
+            return false;
+        }
+
+        $meta = Arr::get($product, 'licensesMeta.meta_value', []);
+
+        if (empty($meta)) {
+            return false;
+        }
+
+        $meta = is_string($meta) ? json_decode($meta, true) : $meta;
+
+        return Arr::get($meta, 'enabled') === 'yes';
+
+    }
+
+
+    public static function generateDownloadFileLink($productDownload, $orderId = null, $validityInMinutes = 60, $isAdmin = false): string
+    {
+        $identifier = Arr::get($productDownload, 'download_identifier', '');
+
+        $validityInMinutes = apply_filters('fluent_cart/download_link_validity_in_minutes', $validityInMinutes, [
+            'product_download' => $productDownload,
+            'order_id'         => $orderId,
+            'is_admin'         => $isAdmin,
+        ]);
+
+        $signParams = [
+            'download_identifier' => $identifier,
+            'valid_till'          => DateTime::now()
+                ->addMinutes($validityInMinutes ?? 60)
+                ->getTimestamp()
+        ];
+
+        if ($orderId) {
+            $orderId = Arr::wrap($orderId);
+            $signParams['order_id'] = json_encode($orderId);
+        }
+
+        $url = (new BaseUrl())->sign(site_url('/'), $signParams);
+
+        return URL::appendQueryParams($url, [
+            'fluent-cart' => 'download-by-id',
+        ]);
+
+    }
+
+
+    public static function readableFileSize($bytes): string
+    {
+        // Converts bytes to a human-readable format (e.g., KB, MB, GB)
+        // Example: 1024 -> "1 KB"
+        // Example: 1048576 -> "1 MB"
+
+        if (!$bytes && $bytes !== 0) return '';
+        $units = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
+        $i = floor(log($bytes, 2) / 10);
+        $size = $bytes / pow(1024, $i);
+        return round($size, 2) . ' ' . $units[$i];
+    }
+
+
+    public static function getSitePrefix()
+    {
+        $siteUrl = rtrim(home_url(), '/');
+        // remove http:// or https:// from the URL
+        $siteUrl = preg_replace('#^https?://#', '', $siteUrl);
+        $sitePrefix = str_replace(['/', '.'], '_', $siteUrl);
+
+        return apply_filters('fluent_cart/site_prefix', $sitePrefix, []);
+    }
+
+    public static function humanIntervalMaps($interval = '')
+    {
+        $intervals = [
+            'daily'       => __('day', 'fluent-cart'),
+            'weekly'      => __('week', 'fluent-cart'),
+            'monthly'     => __('month', 'fluent-cart'),
+            'quarterly'   => __('quarter', 'fluent-cart'),
+            'half_yearly' => __('six month', 'fluent-cart'),
+            'yearly'      => __('year', 'fluent-cart'),
+        ];
+
+        return Arr::get($intervals, $interval);
+    }
+
+    /**
+     * @return array Array of intervals with label and value
+     */
+    public static function getAvailableSubscriptionIntervalOptions(): array
+    {
+        $intervals = [
+            [
+                'label'     => __('Yearly', 'fluent-cart'),
+                'value'     => 'yearly',
+                'map_value' => 'year',
+            ],
+            [
+                'label'     => __('Half Yearly', 'fluent-cart'),
+                'value'     => 'half_yearly',
+                'map_value' => 'half_year',
+            ],
+            [
+                'label'     => __('Quarterly', 'fluent-cart'),
+                'value'     => 'quarterly',
+                'map_value' => 'quarter',
+            ],
+            [
+                'label'     => __('Monthly', 'fluent-cart'),
+                'value'     => 'monthly',
+                'map_value' => 'month',
+            ],
+            [
+                'label'     => __('Weekly', 'fluent-cart'),
+                'value'     => 'weekly',
+                'map_value' => 'week',
+            ],
+            [
+                'label'     => __('Daily', 'fluent-cart'),
+                'value'     => 'daily',
+                'map_value' => 'day',
+            ]
+        ];
+
+        return apply_filters('fluent_cart/available_subscription_interval_options', $intervals);
+    }
+
+    public static function translateIntervalToStandardFormat($repeatInterval)
+    {
+        if (empty($repeatInterval)) {
+            return 'year';
+        }
+
+        $intervalMaps = static::getAvailableSubscriptionIntervalMaps();
+
+        if (!isset($intervalMaps[$repeatInterval])) {
+            return 'year';
+        }
+
+        return $intervalMaps[$repeatInterval];
+    }
+
+    public static function getAvailableSubscriptionIntervalMaps()
+    {
+        $intervalOptions = static::getAvailableSubscriptionIntervalOptions();
+
+        $intervalMaps = [];
+        foreach ($intervalOptions as $option) {
+            $intervalMaps[$option['value']] = $option['map_value'];
+        }
+
+        return $intervalMaps;
+
+    }
+
+    public static function calculateAdjustedTrialDaysForInterval($trialDays, $repeatInterval)
+    {
+        $intervalInDays = static::subscriptionIntervalInDays($repeatInterval);
+
+        $maxTrialDaysAllowed = apply_filters('fluent_cart/max_trial_days_allowed', 365, [
+            'existing_trial_days' => $trialDays,
+            'repeat_interval'     => $repeatInterval,
+            'interval_in_days'    => $intervalInDays,
+        ]);
+
+        return min($trialDays + $intervalInDays, $maxTrialDaysAllowed); // return the minimum of the sum of the existing trial days and the interval days, and the max trial allowed
+
+    }
+
+    public static function subscriptionIntervalInDays($interval)
+    {
+        return PaymentHelper::getIntervalDays($interval);
+    }
+
+    public static function parseTermIdsForFilter($filters): array
+    {
+        $taxonomies = Taxonomy::getTaxonomies();
+        if (is_string($filters)) {
+            $filters = json_decode($filters, true);
+        }
+        $formattedFilters = [];
+
+        foreach ($taxonomies as $key => $taxonomy) {
+            $terms = Arr::get($filters, $key, []);
+            if (!is_array($terms)) {
+                $terms = [$terms];
+            }
+
+            $terms = array_filter($terms, function ($term) {
+                return !empty($term);
+            });
+
+            if (!empty($terms)) {
+                $terms = array_map(function ($term) {
+                    return sanitize_text_field((string)$term);
+                }, $terms);
+
+
+                $formattedFilters[$key] = $terms;
+            }
+
+
+        }
+
+        return $formattedFilters;
+    }
+
+    public static function mergeTermIdsForFilter($array1 = [], $array2 = []): array
+    {
+        $result = [];
+
+        foreach ([$array1, $array2] as $array) {
+            foreach ($array as $key => $values) {
+                if (!isset($result[$key])) {
+                    $result[$key] = [];
+                }
+                $result[$key] = array_values(array_unique(array_merge($result[$key], $values)));
+            }
+        }
+
+        return $result;
+    }
+
+    /**
+     * Older one-time bundle variations lost is_bundle_product, so bundle_child_ids also counts.
+     */
+    public static function isBundleItem($otherInfo): bool
+    {
+        return Arr::get($otherInfo, 'is_bundle_product', 'no') == 'yes'
+            || !empty(Arr::get($otherInfo, 'bundle_child_ids', []));
+    }
+
+    public static function loadBundleChild(array $variants, $select = ['id', 'variation_title']): array
+    {
+        $allChildVariants = Arr::pluck($variants, 'other_info.bundle_child_ids');
+
+        $allChildVariants = array_unique(Arr::flatten($allChildVariants));
+        $allChildVariants = array_values(array_diff(
+            $allChildVariants,
+            Arr::pluck($variants, 'id')
+        ));
+        $allChildVariants = array_filter($allChildVariants);
+        $childVariants = ProductVariation::query()
+            ->whereIn('id', $allChildVariants)
+            ->with('product:ID,post_title')
+            ->select($select)
+            ->get()
+            ->toArray();
+
+        // Extract post_title from product and remove product object to keep data clean
+        foreach ($childVariants as $key => $childVariant) {
+            $postTitle = Arr::get($childVariant, 'product.post_title');
+            if ($postTitle) {
+                $childVariants[$key]['post_title'] = $postTitle;
+                unset($childVariants[$key]['product']);
+            }
+        }
+
+        foreach ($variants as &$variant) {
+            $childIds = Arr::get($variant, 'other_info.bundle_child_ids', []);
+            $variant['bundle_child_ids'] = $childIds;
+            if (count($childIds) < 1) {
+                $variant['child_variants'] = [];
+                continue;
+            }
+            foreach ($childVariants as $childVariant) {
+                if (in_array($childVariant['id'], Arr::get($variant, 'other_info.bundle_child_ids', []))) {
+                    $variant['child_variants'][$childVariant['id']] = $childVariant;
+                }
+            }
+        }
+
+        return $variants;
+    }
+
+    public static function formatBundleChildTitle($productTitle, $variationTitle): string
+    {
+        $productTitle = (string) $productTitle;
+        $variationTitle = (string) $variationTitle;
+
+        if ($variationTitle === '' || $productTitle === $variationTitle) {
+            return $productTitle;
+        }
+
+        if ($productTitle === '') {
+            return $variationTitle;
+        }
+
+        return $productTitle . ' - ' . $variationTitle;
+    }
+
+    /**
+     * Translate digits in a number according to the configured numeric system.
+     *
+     * Converts the digits 0-9 in the given number to their equivalents
+     * defined in the numeric system string from `dateTimeStrings()`.
+     * This allows displaying numbers in other numeral systems, e.g., Bengali, Arabic, Hindi, etc.
+     *
+     * Only digits are translated; other characters such as decimal points, currency symbols, or text remain unchanged.
+     *
+     * @param int|float|string $number The number to translate.
+     * @return string The number with digits translated according to the configured numeric system.
+     */
+    public static function translateNumber($number): string
+    {
+        $config = TransStrings::dateTimeStrings();
+        $numericSystem = Arr::get($config, 'numericSystem', '0_1_2_3_4_5_6_7_8_9');
+        $digits = explode('_', $numericSystem);
+
+        return strtr(
+            (string)$number,
+            array_combine(range(0, 9),
+                $digits)
+        );
+    }
+
+    public static function isModalCheckoutEnabled(): bool
+    {
+        //$storeSettings = new StoreSettings();
+        //$enableModalCheckout = $storeSettings->get('enable_modal_checkout', 'no');
+        return apply_filters('fluent_cart/enable_modal_checkout', false);
+    }
+
+    public static function isAdminUser(): bool
+    {
+        return current_user_can('manage_options');
+    }
+
+    /**
+     * Convert string/boolean to actual boolean value.
+     * Handles shortcode string attributes like "true"/"false"
+     *
+     * @param mixed $value The value to convert to boolean
+     * @param bool $default Default value if conversion fails
+     * @return bool The boolean result
+     */
+    public static function toBool($value, bool $default = false): bool
+    {
+        if (is_bool($value)) {
+            return $value;
+        }
+
+        if (is_string($value)) {
+            $value = strtolower(trim($value));
+            if (in_array($value, ['true', '1', 'yes', 'on'], true)) {
+                return true;
+            }
+            if (in_array($value, ['false', '0', 'no', 'off'], true)) {
+                return false;
+            }
+        }
+
+        return $default;
+    }
+
+    public static function formatTaxRatePercent(float $rate): string
+    {
+        $formatted = number_format($rate, 4, '.', '');
+        if (strpos($formatted, '.') !== false) {
+            $formatted = rtrim($formatted, '0');
+            $formatted = rtrim($formatted, '.');
+        }
+        return $formatted;
+    }
+
+    /**
+     * Returns the tax label for order-level tax rows (tax_total, not per-item).
+     * For mixed orders, indicates tax varies per item.
+     *
+     * @param \FluentCart\App\Models\Order $order
+     * @return string
+     */
+    public static function getOrderTaxLabel($order) {
+        if ((int) $order->tax_behavior === 3) {
+            return esc_html__('(Varies)', 'fluent-cart');
+        }
+        return (int) $order->tax_behavior === 2
+            ? esc_html__('(Included)', 'fluent-cart')
+            : esc_html__('(Excluded)', 'fluent-cart');
+    }
+
+    /**
+     * Product placeholder illustration (an open box holding a picture) shown
+     * wherever a product has no image. The web copy is a 1200px WebP (sharp on 2x screens); email
+     * clients (Outlook) and PDF renderers get a 300px PNG of the same art.
+     */
+    const PRODUCT_PLACEHOLDER_IMAGE = 'images/product-placeholder.webp';
+    const PRODUCT_PLACEHOLDER_EMAIL_IMAGE = 'images/product-placeholder.png';
+
+    public static function getProductPlaceholderUrl(): string
+    {
+        return \FluentCart\App\Vite::getAssetUrl(static::PRODUCT_PLACEHOLDER_IMAGE);
+    }
+
+    public static function getProductPlaceholderEmailUrl(): string
+    {
+        return \FluentCart\App\Vite::getAssetUrl(static::PRODUCT_PLACEHOLDER_EMAIL_IMAGE);
+    }
+
+    /**
+     * A product image URL, or the placeholder when there is none. Carts store
+     * the thumbnail URL in cart_data, so carts built before the illustration
+     * still carry the old generic icon (images/placeholder.svg); map that too.
+     */
+    public static function productImageOrPlaceholder($url): string
+    {
+        $url = is_string($url) ? $url : '';
+
+        if ($url === '' || preg_match('#/images/placeholder\.svg(\?.*)?$#', $url)) {
+            return static::getProductPlaceholderUrl();
+        }
+
+        return $url;
+    }
+}

@@ -1,0 +1,320 @@
+<?php if (!defined('ABSPATH')) exit; ?>
+<?php
+
+/**
+ * All registered action's handlers should be in app\Hooks\Handlers,
+ * addAction is similar to add_action and addCustomAction is just a
+ * wrapper over add_action which will add a prefix to the hook name
+ * using the plugin slug to make it unique in all WordPress plugins,
+ * ex: $app->addCustomAction('foo', ['FooHandler', 'handleFoo']) is
+ * equivalent to add_action('slug-foo', ['FooHandler', 'handleFoo']).
+ */
+
+/**
+ * @var $app FluentCart\Framework\Foundation\Application
+ */
+
+use FluentCart\App\Http\Routes\WebRoutes;
+
+(new \FluentCart\App\CPT\FluentProducts)->register();
+(new \FluentCart\App\Services\Email\EmailNotificationMailer)->register();
+(new \FluentCart\App\Hooks\Handlers\CPTHandler)->register();
+(new \FluentCart\App\Hooks\Handlers\MenuHandler)->register();
+(new \FluentCart\App\Hooks\Handlers\AdminMenuBarHandler)->register();
+(new \FluentCart\App\Hooks\Handlers\FluentCartHandler)->register();
+(new \FluentCart\App\Hooks\Handlers\ReminderHandler)->register();
+(new \FluentCart\App\Hooks\Handlers\TermProductsHandler)->register();
+
+(new \FluentCart\App\Hooks\Handlers\ShortCodes\ShopAppHandler)->register();
+(new \FluentCart\App\Hooks\Handlers\ShortCodes\OrderReviewShortCode)->register();
+
+(new FluentCart\App\Hooks\Handlers\CustomCheckout\CustomCheckout())->register();
+
+// Tax Module Init
+add_action('init', function () {
+    (new \FluentCart\App\Modules\Tax\TaxModule())->register();
+}, 1);
+
+// Turnstile Module Init
+(new \FluentCart\App\Modules\Turnstile\TurnstileInit())->register(\FluentCart\App\App::getInstance());
+
+// Reviews Module Init
+(new \FluentCart\App\Modules\Reviews\ReviewModule())->register();
+
+(new \FluentCart\App\Modules\FluentPlayer\FluentPlayerAdminAssets())->register();
+
+// Register Pro Gateways Promo
+(new \FluentCart\App\Hooks\Handlers\PromoGatewaysHandler())->register();
+
+// Register Addon Gateways
+(new \FluentCart\App\Hooks\Handlers\AddonGatewaysHandler())->register();
+
+// Web Checkout
+(new \FluentCart\App\Hooks\Cart\WebCheckoutHandler())->register();
+
+
+\FluentCart\App\Hooks\Handlers\BlockEditors\ShopApp\ShopAppBlockEditor::register();
+\FluentCart\App\Hooks\Handlers\BlockEditors\ProductCarousel\ProductCarouselBlockEditor::register();
+\FluentCart\App\Hooks\Handlers\BlockEditors\MediaCarousel\MediaCarouselBlockEditor::register();
+
+\FluentCart\App\Hooks\Handlers\ShortCodes\SearchBarShortCode::register();
+\FluentCart\App\Hooks\Handlers\BlockEditors\SearchBarBlockEditor::register();
+\FluentCart\App\Hooks\Handlers\BlockEditors\CurrencySwitcherBlockEditor::register();
+\FluentCart\App\Hooks\Handlers\BlockEditors\PricingTableBlockEditor::register();
+\FluentCart\App\Hooks\Handlers\BlockEditors\CustomerProfileBlockEditor::register();
+\FluentCart\App\Hooks\Handlers\ShortCodes\CustomerProfileHandler::register();
+\FluentCart\App\Hooks\Handlers\BlockEditors\Checkout\CheckoutBlockEditor::register();
+\FluentCart\App\Hooks\Handlers\ShortCodes\CartShortcode::register();
+\FluentCart\App\Hooks\Handlers\ShortCodes\PricingTableShortCode::register();
+\FluentCart\App\Hooks\Handlers\ShortCodes\Checkout\CheckoutPageHandler::register();
+\FluentCart\App\Hooks\Handlers\BlockEditors\ProductCardBlockEditor::register();
+\FluentCart\App\Hooks\Handlers\BlockEditors\ProductGalleryBlockEditor::register();
+\FluentCart\App\Hooks\Handlers\BlockEditors\ProductInfoBlockEditor::register();
+\FluentCart\App\Hooks\Handlers\BlockEditors\BuySectionBlockEditor::register();
+\FluentCart\App\Hooks\Handlers\BlockEditors\ProductTitleBlockEditor::register();
+\FluentCart\App\Hooks\Handlers\BlockEditors\ProductSwatchesBlockEditor::register();
+\FluentCart\App\Hooks\Handlers\BlockEditors\ProductQuickViewBlockEditor::register();
+\FluentCart\App\Hooks\Handlers\BlockEditors\ProductImageBlockEditor::register();
+\FluentCart\App\Hooks\Handlers\BlockEditors\PriceRangeBlockEditor::register();
+\FluentCart\App\Hooks\Handlers\BlockEditors\SaleBadgeBlockEditor::register();
+\FluentCart\App\Hooks\Handlers\BlockEditors\ExcerptBlockEditor::register();
+\FluentCart\App\Hooks\Handlers\BlockEditors\ProductDescriptionBlockEditor::register();
+\FluentCart\App\Hooks\Handlers\ShortCodes\ProductCardShortCode::register();
+\FluentCart\App\Hooks\Handlers\BlockEditors\Buttons\BuyNowButtonBlockEditor::register();
+\FluentCart\App\Hooks\Handlers\BlockEditors\Buttons\AddToCartButtonBlockEditor::register();
+
+\FluentCart\App\Hooks\Handlers\BlockEditors\MiniCartBlockEditor::register();
+\FluentCart\App\Hooks\Handlers\BlockEditors\Cart\CartBlockEditor::register();
+\FluentCart\App\Hooks\Handlers\BlockEditors\ProductCategoriesListBlockEditor::register();
+\FluentCart\App\Hooks\Handlers\BlockEditors\RelatedProduct\RelatedProductBlockEditor::register();
+\FluentCart\App\Hooks\Handlers\ShortCodes\Buttons\DirectCheckoutShortcode::register();
+\FluentCart\App\Hooks\Handlers\ShortCodes\Buttons\AddToCartShortcode::register();
+\FluentCart\App\Hooks\Handlers\ShortCodes\MiniCartShortcode::register();
+\FluentCart\App\Hooks\Handlers\ShortCodes\ProductCategoriesListShortcode::register();
+\FluentCart\App\Hooks\Handlers\ShortCodes\ProductTitleShortCode::register();
+\FluentCart\App\Hooks\Handlers\ShortCodes\ProductImageShortCode::register();
+\FluentCart\App\Hooks\Handlers\ShortCodes\SingleProductShortCode::register();
+
+
+\FluentCart\App\Hooks\Handlers\BlockEditors\ProductSkuBlockEditor::register();
+\FluentCart\App\Hooks\Handlers\BlockEditors\ProductPackageDescriptionBlockEditor::register();
+\FluentCart\App\Hooks\Handlers\BlockEditors\StoreLogoBlockEditor::register();
+\FluentCart\App\Hooks\Handlers\ShortCodes\StoreLogoShortCode::register();
+\FluentCart\App\Hooks\Handlers\BlockEditors\CustomerDashboardButtonBlockEditor::register();
+\FluentCart\App\Hooks\Handlers\ShortCodes\CustomerDashboardButtonShortcode::register();
+
+
+(new \FluentCart\App\Modules\StockManagement\StockManagement())->register(fluentCart());
+
+if (\FluentCart\Api\ModuleSettings::isActive('stock_management')) {
+    \FluentCart\App\Hooks\Handlers\BlockEditors\StockBlock::register();
+    \FluentCart\App\Hooks\Handlers\BlockEditors\SoldOutBadgeBlockEditor::register();
+}
+
+// Registered whether or not the reviews module is active: the block ships
+// inside the Shop App, Product Info and Related Products card templates, so
+// an unregistered block would greet the editor with "your site doesn't
+// include support for this block" on every card. With the module off it
+// stays out of the inserter and renders nothing, in the editor and on the
+// page — see ProductRatingBlockEditor.
+\FluentCart\App\Hooks\Handlers\BlockEditors\ProductRatingBlockEditor::register();
+
+if (\FluentCart\Api\ModuleSettings::isActive('reviews') && class_exists(\FluentCart\App\Hooks\Handlers\BlockEditors\ProductReviewsBlockEditor::class)) {
+    \FluentCart\App\Hooks\Handlers\BlockEditors\ProductReviewsBlockEditor::register();
+    \FluentCart\App\Hooks\Handlers\BlockEditors\WriteAReviewButtonBlockEditor::register();
+    \FluentCart\App\Hooks\Handlers\BlockEditors\ProductReviewFormBlockEditor::register();
+    \FluentCart\App\Hooks\Handlers\BlockEditors\ProductReviewSummaryBlockEditor::register();
+    \FluentCart\App\Hooks\Handlers\BlockEditors\ProductReviewList\ProductReviewListBlockEditor::register();
+    \FluentCart\App\Hooks\Handlers\BlockEditors\ProductReviewSummaryGroupBlockEditor::register();
+    \FluentCart\App\Hooks\Handlers\ShortCodes\ProductReviewsShortCode::register();
+}
+
+(new \FluentCart\App\Hooks\Cart\CartLoader)->register();
+(new \FluentCart\App\Hooks\Handlers\GlobalPaymentHandler)->register();
+
+\FluentCart\App\Http\Routes\WebRoutes::register();
+
+(new \FluentCart\App\Modules\IntegrationActions\GlobalIntegrationActionHandler())->register();
+(new \FluentCart\App\Hooks\Handlers\GlobalStorageHandler)->register();
+
+
+//Register Page Handlers
+(new \FluentCart\App\Hooks\Handlers\ShortCodes\ReceiptHandler)->register();
+
+(new \FluentCart\App\Modules\Coupon\CouponHandler)->register();
+
+\FluentCart\App\Services\Theme\AdminTheme::applyTheme();
+\FluentCart\App\Services\Theme\FrontendTheme::applyTheme();
+
+(new \FluentCart\App\CPT\Pages)->handlePageDelete();
+(new \FluentCart\App\Services\FileSystem\DownloadService)->register();
+
+(new \FluentCart\App\Hooks\Handlers\UserHandler())->register();
+
+// Corrected hook name: fluent_cart/order_paid_async_private_handle
+// Legacy (typo'd) listener kept for any pending Action Scheduler jobs
+$orderPaidAsyncHandler = function ($data) {
+    $orderId = \FluentCart\Framework\Support\Arr::get($data, 'order_id');
+
+    if (!$orderId) {
+        return;
+    }
+
+    $order = \FluentCart\App\Models\Order::find($orderId);
+    if (!$order || $order->payment_status !== 'paid') {
+        return;
+    }
+
+    // Claim the run by deleting the meta and branching on the affected-row count.
+    // The Action Scheduler worker and the receipt-page AJAX nudge
+    // (IntegrationEventListener::runOrderActionsAjax) can arrive together, so a
+    // read-then-delete would let both pass the guard and fire order_paid_done
+    // twice. A single DELETE is atomic: MySQL hands the row to exactly one
+    // caller, and the loser sees 0 rows and returns.
+    if (!$order->deleteMeta('action_scheduler_id')) {
+        return;
+    }
+
+    $transaction = \FluentCart\App\Models\OrderTransaction::query()
+        ->where('order_id', $order->id)
+        ->where('status', \FluentCart\App\Helpers\Status::TRANSACTION_SUCCEEDED)
+        ->orderBy('id', 'DESC')
+        ->first();
+
+    $eventData = [
+        'order'       => $order,
+        'transaction' => $transaction,
+        'customer'    => $order->customer
+    ];
+
+    if ($order->type === 'subscription' || $order->type === 'renewal') {
+        $subscription = \FluentCart\App\Models\Subscription::query()->where('parent_order_id', $order->id)->first();
+        if ($subscription) {
+            $eventData['subscription'] = $subscription;
+        }
+    }
+
+    do_action('fluent_cart/order_paid_done', $eventData);
+
+};
+add_action('fluent_cart/order_paid_async_private_handle', $orderPaidAsyncHandler, 1, 1);
+
+// The settled half of a review approval — see ReviewApproved::afterDispatch().
+// Runs off the request, so it trusts nothing it was told: the review is
+// re-read, and only one that is still an approved top-level review is
+// announced. Deleted or held back since, nothing fires.
+$reviewApprovedAsyncHandler = function ($data) {
+    $reviewId = (int) \FluentCart\Framework\Support\Arr::get($data, 'review_id');
+
+    if (!$reviewId) {
+        return;
+    }
+
+    $review = \FluentCart\App\Models\ProductReview::query()->with('product')->find($reviewId);
+
+    if (!$review || $review->parent_id || $review->status !== \FluentCart\App\Helpers\Status::REVIEW_APPROVED) {
+        return;
+    }
+
+    do_action('fluent_cart/review_approved_done', [
+        'review'  => $review,
+        'product' => $review->product,
+    ]);
+};
+add_action('fluent_cart/review_approved_async_private_handle', $reviewApprovedAsyncHandler, 1, 1);
+
+// The settled half of a store reply — see ReviewReplied::afterDispatch().
+// Announced only while both halves are published: the reply itself, and the
+// review it answers. A reply to a review nobody can see is not a
+// conversation the reviewer can be pointed at.
+$reviewRepliedAsyncHandler = function ($data) {
+    $replyId = (int) \FluentCart\Framework\Support\Arr::get($data, 'reply_id');
+
+    if (!$replyId) {
+        return;
+    }
+
+    $reply = \FluentCart\App\Models\ProductReview::query()->with('product')->find($replyId);
+
+    if (!$reply || !$reply->parent_id || !$reply->is_admin_reply || $reply->status !== \FluentCart\App\Helpers\Status::REVIEW_APPROVED) {
+        return;
+    }
+
+    $review = \FluentCart\App\Models\ProductReview::query()->find((int) $reply->parent_id);
+
+    if (!$review || $review->parent_id || $review->status !== \FluentCart\App\Helpers\Status::REVIEW_APPROVED) {
+        return;
+    }
+
+    do_action('fluent_cart/review_replied_done', [
+        'reply'   => $reply,
+        'review'  => $review,
+        'product' => $reply->product,
+    ]);
+};
+add_action('fluent_cart/review_replied_async_private_handle', $reviewRepliedAsyncHandler, 1, 1);
+
+
+//
+//$app->addAction('fluent_cart/orders_filter_customer', function ($query, $filters) {
+//    return (new \FluentCart\App\Models\Order)->buildCustomerFilterQuery($query, $filters);
+//}, 10, 2);
+
+// require the CLI
+if (defined('WP_CLI') && WP_CLI) {
+    \WP_CLI::add_command('fluent_cart', '\FluentCart\App\Hooks\CLI\Commands');
+
+}
+
+\FluentCart\App\Modules\Subscriptions\SubscriptionModule::register();
+\FluentCart\App\Modules\Shipping\ShippingModule::register();
+\FluentCart\App\Modules\StoreManagedRenewal\RenewalModule::register();
+\FluentCart\App\Modules\MultiCurrency\MultiCurrencyModule::register();
+(new \FluentCart\App\Hooks\Handlers\AttributesHandler())->register();
+(new \FluentCart\App\Hooks\Handlers\AdvancedVariationHandler())->register();
+
+// MCP (Model Context Protocol) — operator AI tools. Ships OFF; enabled in
+// Settings → Features & addon → MCP. See MCPInit::boot() for the bootstrap.
+\FluentCart\App\Modules\MCP\MCPInit::boot();
+
+$app->ready(function () use ($app) {
+    \FluentCart\App\Models\Connection\ConnectionManager::connect($this->app);
+});
+
+
+// Add to your theme's functions.php or a custom plugin
+// For Elementor preview URL
+
+
+(new \FluentCart\App\Services\Integration)->register();
+
+$app->addAction('fluent_cart/integration/schedule_feed', function ($queueId) use ($app) {
+    (new \FluentCart\App\Modules\Integrations\GlobalNotificationHandler())->processIntegrationAction($queueId);
+});
+
+// Schedulers
+(new \FluentCart\App\Hooks\Scheduler\AutoSchedules\FiveMinuteScheduler())->register();
+(new \FluentCart\App\Hooks\Scheduler\AutoSchedules\HourlyScheduler())->register();
+(new \FluentCart\App\Hooks\Scheduler\AutoSchedules\DailyScheduler())->register();
+
+
+/**
+ * Theme Hooks
+ */
+
+add_action('init', [\FluentCart\App\Modules\Templating\TemplateLoader::class, 'init']);
+add_action('after_setup_theme', function () {
+    \FluentCart\App\Modules\Templating\TemplateLoader::registerBlockParts();
+    (new \FluentCart\App\Modules\Templating\Bricks\BricksLoader())->register();
+});
+
+
+/**
+ * Development Hooks
+ */
+
+add_action('init', function () {
+    if (!is_admin()) {
+        WebRoutes::renderModalCheckout();
+    }
+});

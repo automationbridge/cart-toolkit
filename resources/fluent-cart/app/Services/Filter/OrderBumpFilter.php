@@ -1,0 +1,214 @@
+<?php
+
+namespace FluentCart\App\Services\Filter;
+
+use FluentCart\App\Helpers\Status;
+use FluentCart\App\Services\DateTime\DateTime;
+use FluentCartPro\App\Modules\Licensing\Models\License;
+use FluentCartPro\App\Modules\Promotional\Models\OrderPromotion;
+
+
+class OrderBumpFilter extends BaseFilter
+{
+
+    public function applySimpleFilter(?string $search = null): void
+    {
+        $isApplied = $this->applySimpleOperatorFilter($search);
+        if ($isApplied) {
+            return;
+        }
+
+        $this->query->when($search ?? $this->search, function ($query, $search) {
+            // If search is an array, implode it
+            $search = is_array($search) ? implode(' ', $search) : $search;
+
+            // If search is empty or null, return the query
+            if (empty($search)) {
+                return $query;
+            }
+
+            $query->where(function ($query) use ($search) {
+                $query->where('title', 'like', '%' . $search . '%')
+                    ->orWhere('id', 'like', '%' . $search . '%');
+            });
+
+            return $query;
+        });
+    }
+
+    public function tabsMap(): array
+    {
+        return [
+            'active'   => _x('Active', 'Order bump status', 'fluent-cart'),
+            'inactive' => _x('Inactive', 'Order bump status', 'fluent-cart'),
+        ];
+    }
+
+    public function getModel(): string
+    {
+        return OrderPromotion::class;
+    }
+
+    public static function getFilterName(): string
+    {
+        return 'order_bump';
+    }
+
+    /**
+     * @return array<string, array<string, mixed>>
+     */
+    protected static function sortableColumns(): array
+    {
+        return [
+            'id'         => ['label' => __('Order Bump ID', 'fluent-cart'), 'column' => 'id'],
+            'title'      => ['label' => __('Title', 'fluent-cart'), 'column' => 'title'],
+            'created_at' => ['label' => __('Created at', 'fluent-cart'), 'column' => 'created_at'],
+        ];
+    }
+
+    /**
+     * Intentionally empty. Nothing instantiates this filter: the order-bump
+     * list endpoint is Pro's OrderBumpController::index(), which builds its own
+     * OrderPromotion query and hardcodes `->with(['product_variant.product'])`.
+     * OrderBumpTable.js's `product_variant` therefore never reaches this map.
+     *
+     * If the Pro controller is ever moved onto this filter, declare
+     * `product_variant` (and its `.product` child) here — do not widen the map
+     * speculatively before that happens.
+     *
+     * @return array<string, callable>
+     */
+    protected function allowedWiths(): array
+    {
+        return [];
+    }
+
+
+    public function applyActiveViewFilter(?string $activeView = null): void
+    {
+        $activeView = $activeView ?? $this->activeView;
+        $this->query->when($activeView, function ($query, $activeView) {
+            $validStatuses = [
+                'active',
+                'draft'
+            ];
+
+            if (in_array($activeView, $validStatuses)) {
+                if ($activeView == 'expired') {
+                    $query->where('expiration_date', '<', DateTime::gmtNow());
+                } else if ($activeView == 'active') {
+                    $query->where(function ($query) {
+                        $query->where('expiration_date', '>', DateTime::gmtNow())
+                            ->orWhereNull('expiration_date');
+                    })
+                        ->where('status', 'active');
+                } else {
+                    $query->where('status', $activeView);
+                }
+            } else if ($activeView == 'inactive') {
+                $query->where('status', 'active')
+                    ->whereDoesntHave('activations');
+            }
+
+            return $query;
+        });
+    }
+
+    public static function getSearchableFields(): array
+    {
+        return [
+            'key' => [
+                'column'      => 'title',
+                'description' => 'title',
+                'type'        => 'string'
+            ]
+        ];
+    }
+
+    public static function advanceFilterOptions(): array
+    {
+        $filters = [
+            'product'  => [
+                'label'    => __('Products', 'fluent-cart'),
+                'value'    => 'product',
+                'children' => [
+                    [
+                        'label'           => __('By Products', 'fluent-cart'),
+                        'value'           => 'product',
+                        'column'          => 'variation_id',
+                        'filter_type'     => 'relation',
+                        'relation'        => 'productVariant',
+                        'remote_data_key' => 'product_variations',
+                        'type'            => 'remote_tree_select',
+                        'limit'           => 10,
+                    ],
+                ],
+            ],
+            'customer' => [
+                'label'    => __('Customer Property', 'fluent-cart'),
+                'value'    => 'customer',
+                'children' => [
+                    [
+                        'label'       => __('Customer first name', 'fluent-cart'),
+                        'value'       => 'customer_first_name',
+                        'type'        => 'text',
+                        'filter_type' => 'relation',
+                        'column'      => 'first_name',
+                        'relation'    => 'customer',
+                    ],
+                    [
+                        'label'       => __('Customer last name', 'fluent-cart'),
+                        'value'       => 'customer_last_name',
+                        'type'        => 'text',
+                        'filter_type' => 'relation',
+                        'column'      => 'last_name',
+                        'relation'    => 'customer',
+                    ]
+                ],
+            ],
+            'license'  => [
+                'label'    => __('License Property', 'fluent-cart'),
+                'value'    => 'license',
+                'children' => [
+                    [
+                        'label'       => __('License key', 'fluent-cart'),
+                        'value'       => 'license_key',
+                        'type'        => 'text',
+                        'filter_type' => 'column',
+                        'column'      => 'license_key',
+                    ],
+                    [
+                        'label'       => __('Status', 'fluent-cart'),
+                        'value'       => 'status',
+                        'type'        => 'selections',
+                        'filter_type' => 'column',
+                        'column'      => 'status',
+                        'options'     => [
+                            Status::LICENSE_ACTIVE   => _x('Active', 'License status', 'fluent-cart'),
+                            Status::LICENSE_DISABLED => _x('Disabled', 'License status', 'fluent-cart'),
+                            Status::LICENSE_EXPIRED  => _x('Expired', 'License status', 'fluent-cart'),
+                        ],
+                        'is_multiple' => true,
+                        'is_only_in'  => true
+                    ],
+                    [
+                        'label'       => __('Activation Count', 'fluent-cart'),
+                        'value'       => 'activation_count',
+                        'type'        => 'numeric',
+                        'filter_type' => 'column',
+                        'column'      => 'activation_count',
+                    ],
+                    [
+                        'label'       => __('Expiration Date', 'fluent-cart'),
+                        'value'       => 'expiration_date',
+                        'type'        => 'dates',
+                        'filter_type' => 'date',
+                        'column'      => 'expiration_date',
+                    ]
+                ],
+            ],
+        ];
+        return LabelFilter::advanceFilterOptionsForOther($filters);
+    }
+
+}

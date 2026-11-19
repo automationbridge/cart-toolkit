@@ -1,0 +1,568 @@
+<?php
+
+namespace FluentCart\App\Modules\PaymentMethods\StripeGateway\Webhook;
+
+use FluentCart\App\Events\Subscription\SubscriptionRenewalFailed;
+use FluentCart\App\Events\Order\OrderStatusUpdated;
+use FluentCart\App\Helpers\Status;
+use FluentCart\App\Helpers\StatusHelper;
+use FluentCart\App\Models\Order;
+use FluentCart\App\Models\OrderTransaction;
+use FluentCart\App\Models\Subscription;
+use FluentCart\App\Modules\PaymentMethods\StripeGateway\Confirmations;
+use FluentCart\App\Modules\PaymentMethods\StripeGateway\StripeHelper;
+use FluentCart\App\Modules\PaymentMethods\StripeGateway\API\API;
+use FluentCart\App\Services\Payments\Refund;
+use FluentCart\Framework\Support\Arr;
+
+class IPN
+{
+    public function init(): void
+    {
+        // DONE!
+        add_action('fluent_cart/payments/stripe/webhook_charge_refunded', [$this, 'handleChargeRefunded'], 10, 1);
+
+        // Done
+        add_action('fluent_cart/payments/stripe/webhook_charge_succeeded', [$this, 'handleChargeSucceeded'], 10, 1);
+
+        add_action('fluent_cart/payments/stripe/webhook_charge_dispute_created', [$this, 'handleChargeDisputeCreated'], 10, 1);
+        add_action('fluent_cart/payments/stripe/webhook_charge_dispute_closed', [$this, 'handleChargeDisputeClosed'], 10, 1);
+
+        // For Hosted Checkout (Checkout Sessions)
+        add_action('fluent_cart/payments/stripe/webhook_checkout_session_completed', [$this, 'handleCheckoutSessionCompleted'], 10, 1);
+
+        // For Subscriptions
+        add_action('fluent_cart/payments/stripe/webhook_customer_subscription_updated', [$this, 'handleSubscriptionUpdated'], 10, 1);
+        add_action('fluent_cart/payments/stripe/webhook_customer_subscription_deleted', [$this, 'handleSubscriptionUpdated'], 10, 1); // canceled event
+
+        add_action('fluent_cart/payments/stripe/webhook_invoice_payment_failed', [$this, 'handleInvoicePaymentFailed'], 10, 1);
+    }
+
+
+    public function handleChargeRefunded($data)
+    {
+        $event = Arr::get($data, 'event');
+        $order = Arr::get($data, 'order');
+        $order = Order::query()->where('id', $order->id)->first(); // we are just renewing it
+
+        $eventArray = json_decode(json_encode($event), true);
+        $charge = Arr::get($eventArray, 'data.object', []);
+
+        $refunds = Arr::get($charge, 'refunds.data', []);
+
+        if (empty($refunds)) {
+            $chargeId = Arr::get($charge, 'id', '');
+            if ($chargeId) {
+                $refundsResponse = (new API())->getStripeObject('charges/' . $chargeId . '/refunds', [], StripeHelper::modeFromLivemode(isset($event->livemode) ? (bool)$event->livemode : null));
+                if (!is_wp_error($refundsResponse)) {
+                    $refunds = Arr::get($refundsResponse, 'data', []);
+                }
+            }
+        }
+
+        if (!$refunds) {
+            return false;
+        }
+
+        $parentTransaction = OrderTransaction::query()->where('vendor_charge_id', Arr::get($charge, 'payment_intent'))
+            ->where('status', Status::TRANSACTION_SUCCEEDED)
+            ->first();
+
+        if (!$parentTransaction) {
+            return false;
+        }
+
+        $generalData = [
+            'order_id'         => $order->id,
+            'order_type'       => $order->type,
+            'transaction_type' => Status::TRANSACTION_TYPE_REFUND,
+            'payment_method'   => 'stripe',
+            'payment_mode'     => $event->livemode ? 'live' : 'test',
+            'card_last_4'      => Arr::get($charge, 'payment_method_details.card.last4', ''),
+            'card_brand'       => Arr::get($charge, 'payment_method_details.card.brand', ''),
+        ];
+
+        $paymentMethodType = Arr::get($charge, 'payment_method_details.type', '');
+
+        if (!$paymentMethodType) {
+            $paymentMethodType = $parentTransaction->payment_method_type;
+        }
+
+        foreach ($refunds as $refund) {
+            $refundMethodType = Arr::get($refund, 'destination_details.type', '');
+            if (!$refundMethodType) {
+                $refundMethodType = $paymentMethodType;
+            }
+
+            $reason = Arr::get($refund, 'reason', 'other') ? Arr::get($refund, 'reason', 'other') : 'not specified';
+
+            $refundCurrency = Arr::get($charge, 'currency') ?? $order->currency;
+            $normalizedRefundAmount = (int)Arr::get($refund, 'amount', 0);
+
+            if ($refundCurrency && StripeHelper::isZeroDecimal($refundCurrency)) {
+                $normalizedRefundAmount = $normalizedRefundAmount * 100;
+            }
+
+            $refundData = [
+                'payment_method_type' => $refundMethodType,
+                'vendor_charge_id'    => Arr::get($refund, 'id'),
+                'status'              => Status::TRANSACTION_REFUNDED,
+                'currency'            => $refundCurrency,
+                'total'               => $normalizedRefundAmount,
+                'meta'                => [
+                    'reason'         => $reason,
+                    'parent_id'      => $parentTransaction->id,
+                ],
+                'uuid'                => md5(time() . wp_generate_uuid4()),
+                'created_at'          => gmdate('Y-m-d H:i:s', Arr::get($refund, 'created', time())),
+                'updated_at'          => gmdate('Y-m-d H:i:s', Arr::get($refund, 'created', time())),
+            ];
+            $refundData = wp_parse_args($refundData, $generalData);
+
+            $recorded = Refund::createOrRecordRefund($refundData, $parentTransaction);
+            if (is_wp_error($recorded) && $recorded->get_error_code() === 'refund_lock_timeout') {
+                $this->sendResponse(503, $recorded->get_error_message());
+            }
+        }
+    }
+
+    public function handleChargeSucceeded($data)
+    {
+        $event = Arr::get($data, 'event');
+        $order = Arr::get($data, 'order');
+        $eventArray = json_decode(json_encode($event), true);
+        $charge = Arr::get($eventArray, 'data.object');
+
+        $intentId = Arr::get($charge, 'payment_intent');
+
+
+        if (!$intentId) {
+            return false; // no payment intent found
+        }
+
+        $transaction = OrderTransaction::query()->where('vendor_charge_id', $intentId)->first();
+
+        if (!$transaction) {
+            $chargeCurrency = Arr::get($charge, 'currency', $order->currency);
+            $normalizedChargeAmount = (int)Arr::get($charge, 'amount', 0);
+
+            if ($chargeCurrency && StripeHelper::isZeroDecimal($chargeCurrency)) {
+                $normalizedChargeAmount = $normalizedChargeAmount * 100;
+            }
+
+            $transaction = OrderTransaction::query()
+                ->where('order_id', $order->id)
+                ->where('status', Status::TRANSACTION_PENDING)
+                ->where('total', $normalizedChargeAmount)
+                ->orderBy('id', 'DESC')
+                ->first();
+        }
+
+        if (!$transaction) {
+            return false;
+        }
+
+        (new Confirmations())->confirmPaymentSuccessByCharge($transaction, [
+            'charge'    => $charge,
+            'intent_id' => $intentId
+        ]);
+    }
+
+    public function handleChargeDisputeCreated($data)
+    {
+        $event = Arr::get($data, 'event');
+        $order = Arr::get($data, 'order');
+        $eventArray = json_decode(json_encode($event), true);
+        $disputedCharge = Arr::get($eventArray, 'data.object');
+
+        $disputeId = Arr::get($disputedCharge, 'id');
+        $intentId = Arr::get($disputedCharge, 'payment_intent');
+        $status = Arr::get($disputedCharge, 'status');
+
+        if (!$intentId || !in_array($status, ['needs_response', 'under_review', 'warning_needs_response'])) {
+            return false;
+        }
+
+        $transactionModel = OrderTransaction::query()->where('vendor_charge_id', $intentId)->first();
+
+        if (!$transactionModel || $transactionModel->transaction_type === Status::TRANSACTION_TYPE_DISPUTE) {
+            return false;
+        }
+
+        $reason = Arr::get($disputedCharge, 'reason');
+
+        $isChargeRefundable = Arr::get($disputedCharge, 'is_charge_refundable', false);
+
+        // make this transaction type dispute if not already
+        $transactionModel->transaction_type = Status::TRANSACTION_TYPE_DISPUTE;
+        $transactionModel->meta = array_merge($transactionModel->meta ?? [], [
+            'dispute_id'      => $disputeId,
+            'dispute_reason'  => $reason,
+            'is_dispute_actionable' => in_array(Arr::get($disputedCharge, 'status'), ['needs_response', 'warning_needs_response']),
+            'is_charge_refundable' => $isChargeRefundable,
+            'dispute_status' => $status
+        ]);
+
+        $transactionModel->save();
+
+        fluent_cart_warning_log('This payment was disputed', 'Disputed claimed for this payment due to ' . $reason, [
+            'module_name' => 'order',
+            'module_id'   => $order->id,
+            'log_type'    => 'api'
+        ]);
+        if ($transactionModel->subscription_id) {
+            $subscription = Subscription::query()->find($transactionModel->subscription_id);
+            if ($subscription) {
+                $subscription->addLog('This payment was disputed', 'Disputed claimed for this payment due to ' . $reason, 'warning');
+            }
+        }
+
+        return true;
+
+    }
+
+
+    public function handleChargeDisputeClosed($data)
+    {
+        $event = Arr::get($data, 'event');
+        $order = Arr::get($data, 'order');
+        $eventArray = json_decode(json_encode($event), true);
+        $disputedCharge = Arr::get($eventArray, 'data.object');
+
+        $intentId = Arr::get($disputedCharge, 'payment_intent');
+
+        if (!$intentId) {
+            return false; // no payment intent found
+        }
+
+        $transactionModel = OrderTransaction::query()->where('vendor_charge_id', $intentId)->first();
+
+        $status = Arr::get($disputedCharge, 'status');
+        $reason = Arr::get($disputedCharge, 'reason');
+
+        if (!$transactionModel || $transactionModel->status === Status::TRANSACTION_DISPUTE_LOST) {
+            return false;
+        }
+
+        if (in_array($status, ['won', 'prevented', 'warning_closed'])) {
+            $transactionModel->transaction_type = Status::TRANSACTION_TYPE_CHARGE;
+            $transactionModel->meta = array_merge($transactionModel->meta, [
+                'is_dispute_actionable' => false,
+                'is_charge_refundable' => false,
+                'dispute_status' => $status
+            ]);
+            $transactionModel->save();
+
+            $title = 'Dispute won!';
+            $content = 'Dispute won for this payment due to ' . $reason;
+
+            if ($status == 'prevented') {
+                $title = 'Dispute prevented!';
+                $content = 'Dispute was prevented from becoming a formal chargeback. ' . $reason;
+            } else if(  $status == 'warning_closed') {
+                $title = 'Dispute warning closed!';
+                $content = 'An inquiry closed without becoming a formal dispute.';
+            }
+
+            fluent_cart_add_log($title, $content, 'info', [
+                'module_name' => 'order',
+                'module_id'   => $order->id,
+                'log_type'    => 'api'
+            ]);
+            if ($transactionModel->subscription_id) {
+                $subscription = Subscription::query()->find($transactionModel->subscription_id);
+                if ($subscription) {
+                    $subscription->addLog($title, $content);
+                }
+            }
+            return true;
+
+        } else if ($status == 'lost') {
+            $transactionModel->status = Status::TRANSACTION_DISPUTE_LOST;
+            $transactionModel->meta = array_merge($transactionModel->meta ?? [], [
+                'is_dispute_actionable' => false,
+                'is_charge_refundable' => false,
+                'dispute_status' => $status
+            ]);
+            $transactionModel->save();
+
+            fluent_cart_add_log('Dispute lost', 'Dispute lost for this payment . ' . $transactionModel->vendor_charge_id, 'error', [
+                'module_name' => 'order',
+                'module_id'   => $order->id,
+                'log_type'    => 'api'
+            ]);
+            if ($transactionModel->subscription_id) {
+                $subscription = Subscription::query()->find($transactionModel->subscription_id);
+                if ($subscription) {
+                    $subscription->addLog('Dispute lost', 'Dispute lost for this payment . ' . $transactionModel->vendor_charge_id, 'error');
+                }
+            }
+
+            $newPaidAmount = intval($transactionModel->order->total_paid - $transactionModel->total);
+            $transactionModel->order->update([
+                'total_paid' => max($newPaidAmount, 0),
+                'payment_status' => $newPaidAmount > 0 ? Status::PAYMENT_PARTIALLY_PAID : Status::PAYMENT_FAILED,
+            ]);
+        }
+
+        return true;
+    }
+
+    /**
+     * Handle checkout.session.completed webhook for hosted checkout mode
+     * This ensures webhooks work properly even if redirect confirmation hasn't happened yet
+     */
+    public function handleCheckoutSessionCompleted($data)
+    {
+        $event = Arr::get($data, 'event');
+        $order = Arr::get($data, 'order');
+        $eventArray = json_decode(json_encode($event), true);
+        $session = Arr::get($eventArray, 'data.object');
+
+        $sessionId = Arr::get($session, 'id');
+        $paymentIntentId = Arr::get($session, 'payment_intent');
+        $paymentStatus = Arr::get($session, 'payment_status');
+        $mode = Arr::get($session, 'mode');
+
+        if (!$sessionId) {
+            return false;
+        }
+
+        // Find transaction by session_id stored in meta
+        $transaction = OrderTransaction::query()
+            ->where('order_id', $order->id)
+            ->whereRaw("JSON_EXTRACT(meta, '$.session_id') = ?", [$sessionId])
+            ->first();
+
+        // Fallback: try to find by vendor_charge_id if it was stored as session_id
+        if (!$transaction) {
+            $transaction = OrderTransaction::query()
+                ->where('order_id', $order->id)
+                ->where('vendor_charge_id', $sessionId)
+                ->first();
+        }
+
+        if (!$transaction) {
+            return false;
+        }
+
+        // Skip if already confirmed
+        if ($transaction->status === Status::TRANSACTION_SUCCEEDED) {
+            (new StatusHelper($transaction->order))->syncOrderStatuses($transaction);
+            return true;
+        }
+
+        // Update vendor_charge_id to payment_intent for future webhook lookups
+        if ($paymentIntentId && $mode === 'payment') {
+            $transaction->update([
+                'vendor_charge_id' => $paymentIntentId
+            ]);
+        }
+
+        // For subscription mode, update vendor_subscription_id
+        if ($mode === 'subscription') {
+            $subscriptionId = Arr::get($session, 'subscription');
+            if ($subscriptionId) {
+                $subscription = Subscription::query()->where('id', $transaction->subscription_id)->first();
+                if ($subscription) {
+                    $subscription->update([
+                        'vendor_subscription_id' => $subscriptionId
+                    ]);
+                }
+
+                // Update transaction with payment_intent if available
+                if ($paymentIntentId) {
+                    $transaction->update([
+                        'vendor_charge_id' => $paymentIntentId
+                    ]);
+                }
+            }
+        }
+
+        return true;
+    }
+
+    public function handleSubscriptionUpdated($data)
+    {
+        $event = Arr::get($data, 'event');
+        $order = Arr::get($data, 'order');
+
+        $currentSubscription = Subscription::query()->where('parent_order_id', $order->id)->first();
+
+        if (!$currentSubscription) {
+            return false; // no subscription found
+        }
+
+        return $currentSubscription->reSyncFromRemote();
+    }
+
+    public function handleInvoicePaymentFailed($data)
+    {
+        $event = Arr::get($data, 'event');
+        $order = Arr::get($data, 'order');
+        $invoice = $event->data->object;
+
+        $invoice = (new API())->getStripeObject('invoices/' . $invoice->id, [], StripeHelper::modeFromLivemode(isset($event->livemode) ? (bool)$event->livemode : null));
+
+        $vendorSubscriptionId = Arr::get($invoice, 'subscription', null)
+            ?: Arr::get($invoice, 'parent.subscription_details.subscription', null);
+
+        $subscription = null;
+        if ($vendorSubscriptionId) {
+            $subscription = Subscription::query()
+                ->where('vendor_subscription_id', $vendorSubscriptionId)
+                ->where('parent_order_id', $order->id)
+                ->where('current_payment_method', 'stripe')
+                ->first();
+        }
+
+        if (!$subscription) {
+            return false;
+        }
+
+        $invoiceId = Arr::get($invoice, 'id');
+
+        if (!$invoiceId || !preg_match('/^in_[a-zA-Z0-9_]+$/', $invoiceId)) {
+            return false;
+        }
+
+        $claimKey = 'fct_sub_renewal_failed_' . $subscription->id . '_' . $invoiceId;
+
+        // One notification per failed renewal cycle. invoice.payment_failed fires once
+        // per Stripe retry attempt against the same invoice, and verifyAndProcess()
+        // authenticates by re-fetching the event rather than by signature, so a
+        // resubmitted event id re-runs the handler. The invoice id is stable across
+        // retries within a cycle and distinct for the next one. The stored value must
+        // stay constant — add_option()'s pre-check is not atomic, so the claim leans on
+        // MySQL reporting zero affected rows for an unchanged ON DUPLICATE KEY UPDATE.
+        if (!add_option($claimKey, '1', '', false)) {
+            return true; // already notified for this renewal cycle
+        }
+
+        $paymentIntentId = Arr::get($invoice, 'payment_intent', null);
+        if (is_array($paymentIntentId)) {
+            $paymentIntentId = Arr::get($paymentIntentId, 'id', null);
+        }
+
+        $error = '';
+        if ($paymentIntentId && preg_match('/^[a-zA-Z0-9_-]+$/', $paymentIntentId)) {
+            $paymentIntent = (new API())->getStripeObject('payment_intents/' . $paymentIntentId, [], $order->mode);
+            if (!is_wp_error($paymentIntent)) {
+                $error = (string)Arr::get($paymentIntent, 'last_payment_error.message', '');
+            }
+        }
+
+        if (!$error) {
+            $error = __('Stripe reported a failed invoice payment attempt.', 'fluent-cart');
+        }
+
+        $renewalPayment = [];
+        $amountDue = Arr::get($invoice, 'amount_due');
+        $currency = Arr::get($invoice, 'currency');
+        if (is_numeric($amountDue) && $currency) {
+            $renewalPayment = [
+                'amount'   => StripeHelper::toInternalAmount($amountDue, $currency),
+                'currency' => strtoupper($currency),
+            ];
+        }
+
+        try {
+            (new SubscriptionRenewalFailed($subscription, $order, $order->customer, $error, $renewalPayment))->dispatch();
+        } catch (\Throwable $e) {
+            // The claim is permanent, so a half-finished dispatch would suppress this
+            // renewal forever. Release it so the redelivery reruns the dispatch.
+            delete_option($claimKey);
+            throw $e;
+        }
+
+        return true;
+    }
+
+    public function verifyAndProcess()
+    {
+        $data = (new API())->verifyIPN();
+        if (is_wp_error($data)) {
+            $this->sendResponse(400, $data->get_error_message());
+        }
+
+        $acceptedEvents = [
+            'invoice.paid', // Reviewed for subscription cycle
+            'charge.refunded', // reviewed
+            'charge.succeeded', // reviewed
+            'charge.dispute.created',
+            'charge.dispute.closed',
+            'checkout.session.completed',
+            'customer.subscription.deleted',
+            'customer.subscription.updated',
+            'setup_intent.succeeded', // recovers zero-payable system-subscription vaulting if the AJAX confirm is lost
+            'invoice.payment_failed',
+        ];
+
+        $eventType = $data->type;
+        if (!in_array($eventType, $acceptedEvents)) {
+            $this->sendResponse(200, 'Event type not accepted.');
+        }
+
+        $eventId = $data->id;
+        $livemode = isset($data->livemode) ? (bool)$data->livemode : null;
+        $event = (new API())->getEvent($eventId, $livemode);
+
+        if (!$event || is_wp_error($event)) {
+            $reason = is_wp_error($event)
+                ? $event->get_error_code() . ': ' . $event->get_error_message()
+                : 'Stripe returned an empty response.';
+
+            // Warning, not error: fluent_cart_error_log() is a no-op unless
+            // FLUENT_CART_DEV_MODE is on, and this is the only surviving record of
+            // why a delivery failed.
+            fluent_cart_warning_log(
+                'Stripe Webhook: could not fetch event ' . $eventId,
+                $reason . ' (event mode: ' . (is_null($livemode) ? 'unknown' : ($livemode ? 'live' : 'test')) . ')',
+                [
+                    'module_name' => 'payment',
+                    'log_type'    => 'api',
+                ]
+            );
+
+            $this->sendResponse(400, 'Event not found or error occurred. ' . $reason);
+        }
+
+        // get the order from the event, in case of renewal create one
+        $webhook = new Webhook();
+        $order = $webhook->processAndInsertOrderByEvent($event);
+
+        if (!$order) {
+            // Either we have no resolver for this event type, or the resolver ran and
+            // nothing local matched. Both are a 200 — neither is retryable — but they
+            // mean different things when reading the Stripe delivery log.
+            $this->sendResponse(200, $webhook->getUnresolvedReason() ?: __('Event resolved to no order.', 'fluent-cart'));
+        }
+
+        if (is_wp_error($order)) {
+            $this->sendResponse(400, 'Order not found or error occurred. Error: '. $order->get_error_message());
+        }
+
+        $eventType = str_replace('.', '_', $event->type);
+
+        if (has_action('fluent_cart/payments/stripe/webhook_' . $eventType)) {
+
+            do_action('fluent_cart/payments/stripe/webhook_' . $eventType, [
+                'event' => $event,
+                'order' => $order
+            ]);
+
+            $this->sendResponse(200, 'Webhook event processed successfully.');
+        }
+
+        $this->sendResponse(200, 'No handler found for this event type.');
+
+    }
+
+    protected function sendResponse($statusCode = 200, $message = 'Success')
+    {
+        wp_send_json([
+            'message' => $message,
+        ], $statusCode);
+    }
+
+}

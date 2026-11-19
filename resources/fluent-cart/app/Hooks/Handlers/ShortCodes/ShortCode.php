@@ -1,0 +1,90 @@
+<?php
+
+namespace FluentCart\App\Hooks\Handlers\ShortCodes;
+
+use FluentCart\Api\Contracts\CanEnqueue;
+use FluentCart\App\App;
+use FluentCart\App\Services\Renderer\RenderContext;
+use FluentCart\Framework\Support\Arr;
+use FluentCart\Framework\Support\Str;
+
+abstract class ShortCode
+{
+    use CanEnqueue;
+
+    protected static string $shortCodeName;
+    protected ?array $shortCodeAttributes = null;
+    protected ?string $slugPrefix = null;
+
+    public function __construct(array $shortcodeAttributes = [])
+    {
+        $this->shortCodeAttributes = $this->parseAttribute($shortcodeAttributes);
+        $this->slugPrefix = App::config()->get('app.slug');
+    }
+
+    abstract public function render(?array $viewData = null);
+
+
+    public function renderShortcode($block = null)
+    {
+        $this->enqueueAssets();
+        ob_start(null);
+        $this->render(
+            $this->viewData()
+        );
+        return ob_get_clean();
+    }
+
+    public function parseAttribute(array $shortcodeAttributes): array
+    {
+        return $shortcodeAttributes;
+    }
+
+    public function viewData(): ?array
+    {
+        return $this->shortCodeAttributes;
+    }
+
+    public static function getShortCodeName(): string
+    {
+        return static::$shortCodeName;
+    }
+
+    public static function register()
+    {
+        add_shortcode(static::getShortCodeName(), function ($shortcodeAttributes, $content, $block) {
+            // WordPress exposes no "shortcode currently rendering" signal, so
+            // this is the one place that has to say so. Every ShortCode
+            // subclass registers through here, so it is the only place.
+            return RenderContext::declaring(
+                RenderContext::SOURCE_SHORTCODE,
+                static::getShortCodeName(),
+                function () use ($shortcodeAttributes, $block) {
+                    return static::make($shortcodeAttributes)->renderShortcode($block);
+                }
+            );
+        });
+    }
+
+    // Not get_the_content(): wp_enqueue_scripts runs outside the Loop, where
+    // its post globals may be unset and count(null) fatals on PHP 8.
+    public static function currentPostContent(): string
+    {
+        $post = get_post();
+        return $post ? (string) $post->post_content : '';
+    }
+
+    protected function generateEnqueueSlug(): string
+    {
+        return Str::of(
+            $this->slugPrefix . '_' . static::getShortCodeName()
+        )->snake('')->replace('-', '_')->toString();
+    }
+
+    public static function make($shortcodeAttributes = null): ShortCode
+    {
+        return new static(
+            Arr::wrap($shortcodeAttributes)
+        );
+    }
+}

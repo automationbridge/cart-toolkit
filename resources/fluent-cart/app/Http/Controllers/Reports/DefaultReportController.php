@@ -1,0 +1,26 @@
+<?php
+
+namespace FluentCart\App\Http\Controllers\Reports;
+
+use FluentCart\Framework\Http\Request\Request;
+use FluentCart\App\Http\Controllers\Controller;
+use FluentCart\App\Services\Report\ReportHelper;
+use FluentCart\App\Services\Report\DefaultReportService;
+
+class DefaultReportController extends Controller
+{
+    protected $params = [
+        'orderTypes',
+        'paymentStatus',
+    ];
+
+    public function getTopSoldProducts(Request $request): array
+    {
+        $params = ReportHelper::processParams($request->get('params'), $this->params, true);
+
+        $service = DefaultReportService::make();
+
+        return $service->fetchTopSoldProducts($params);
+    }
+
+}

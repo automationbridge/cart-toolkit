@@ -1,0 +1,862 @@
+<?php
+
+namespace FluentCart\App\Hooks\Handlers;
+
+use FluentCart\Api\ModuleSettings;
+use FluentCart\App\Http\Controllers\ModuleSettingsController;
+use FluentCart\App\Services\PluginInstaller\AddonManager;
+use FluentCart\App\App;
+use FluentCart\App\Services\Renderer\CheckoutFieldsSchema;
+use FluentCart\App\Vite;
+use FluentCart\App\Services\Money;
+use FluentCart\App\Services\URL;
+use FluentCart\Api\StoreSettings;
+use FluentCart\Api\PaymentMethods;
+use FluentCart\App\Helpers\Helper;
+use FluentCart\App\Helpers\Status;
+use FluentCart\App\Models\Product;
+use FluentCart\App\Models\Shipment;
+use FluentCart\App\Models\Customer;
+use FluentCart\Framework\Support\Arr;
+use FluentCart\App\CPT\FluentProducts;
+use FluentCart\App\Helpers\AdminHelper;
+use FluentCart\App\Models\AttributeTerm;
+use FluentCart\App\Models\AttributeGroup;
+use FluentCart\App\Models\ShippingMethod;
+use FluentCart\App\Modules\Tax\TaxModule;
+use FluentCart\App\Modules\FluentPlayer\FluentPlayerBridge;
+use FluentCart\App\Modules\AdminFooter\AdminFooter;
+use FluentCart\App\Helpers\CurrenciesHelper;
+use FluentCart\App\Services\Filter\TaxFilter;
+use FluentCart\App\Services\Filter\OrderFilter;
+use FluentCart\App\Services\Filter\LicenseFilter;
+use FluentCart\App\Services\Filter\LicenseSiteFilter;
+use FluentCart\App\Services\Filter\ProductFilter;
+use FluentCart\App\Services\Filter\CustomerFilter;
+use FluentCart\App\Services\Filter\CouponFilter;
+use FluentCart\App\Services\Filter\LogFilter;
+use FluentCart\App\Services\Filter\OrderBumpFilter;
+use FluentCart\App\Services\Filter\ReviewFilter;
+use FluentCart\App\Modules\Shipping\Services\Filter\ShippingClassFilter;
+use FluentCart\App\Modules\Shipping\Services\Filter\ShippingZoneFilter;
+use FluentCart\App\Modules\Integrations\AddOnModule;
+use FluentCart\App\Services\DateTime\DayjsFormatter;
+use FluentCart\App\Services\Translations\TransStrings;
+use FluentCart\App\Services\Permission\PermissionManager;
+use FluentCart\Database\DataBackfills;
+use FluentCart\App\Modules\PaymentMethods\Core\GatewayManager;
+
+class MenuHandler
+{
+    public function register()
+    {
+        add_action('init', [$this, 'init']);
+
+        add_action('admin_init', function () {
+            $page = $_GET['page'] ?? '';
+
+            if ($page == 'fluent-cart') {
+
+                \FluentCart\App\Events\FirstTimePluginActivation::handle();
+                (new AdminFooter())->register();
+                add_action('admin_enqueue_scripts', [ModuleImportMap::class, 'print'], 1);
+                add_action('fluent_cart/loading_app', [ModuleImportMap::class, 'dropLegacyBundles'], PHP_INT_MAX);
+                add_action('admin_enqueue_scripts', function () {
+                    Vite::enqueueStyle('fluent_cart_admin_app_css',
+                        'styles/tailwind/style.css',
+                    );
+                    Vite::enqueueScript('fluent_cart_admin_global_js',
+                        'admin/global.js',
+                    );
+                });
+
+            }
+        });
+
+        // Inline dark mode init script for all FluentCart admin pages (prevents flicker)
+        add_action('admin_head', [$this, 'outputFluentCartDarkModeScript']);
+
+        // Enqueue dark mode toggle JS for taxonomy pages
+        add_action('admin_head', [$this, 'enqueueDarkModeToggleForTaxonomy']);
+
+        // Add a post display state for special WC pages.
+        add_filter('display_post_states', array($this, 'addDisplayPostStates'), 10, 2);
+
+    }
+
+
+    public function addDisplayPostStates($states, $post)
+    {
+        if (!$post || $post->post_type != 'page') {
+            return $states;
+        }
+
+
+        $targetKeys = [
+            'checkout_page_id'         => __('Checkout Page', 'fluent-cart'),
+            'cart_page_id'             => __('Cart Page', 'fluent-cart'),
+            'receipt_page_id'          => __('Receipt Page', 'fluent-cart'),
+            'order_review_page_id'     => __('Order Review Page', 'fluent-cart'),
+            'shop_page_id'             => __('Shop Page', 'fluent-cart'),
+            'customer_profile_page_id' => __('Customer Profile Page', 'fluent-cart'),
+        ];
+
+        $pagesConfig = (new StoreSettings())->getPagesSettings();
+        $pagesConfig = Arr::only($pagesConfig, array_keys($targetKeys));
+
+        if (!is_array($pagesConfig)) {
+            return $states;
+        }
+        $pagesConfig = array_filter($pagesConfig);
+
+        if (empty($pagesConfig)) {
+            return $states;
+        }
+
+
+        $pagesConfig = array_flip($pagesConfig);
+        $targetKey = Arr::get($pagesConfig, $post->ID);
+
+        if ($targetKey && isset($targetKeys[$targetKey])) {
+
+            $logo = '<svg style="vertical-align: middle; height: 18px; width: 18px;" width="18" height="18" viewBox="0 0 300 300" fill="none" xmlns="http://www.w3.org/2000/svg">
+<rect width="300" height="300" rx="30" fill="white"/>
+<path d="M136.561 205.944H47.1367L61.1704 173.491C65.2906 163.963 74.6784 157.795 85.0589 157.795H191.584L184.338 174.551C176.098 193.607 157.322 205.944 136.561 205.944Z" fill="#00009F"/>
+<path d="M210.643 142.439H84.8574L92.1035 125.683C100.344 106.627 119.12 94.2905 139.881 94.2905H248.565L234.531 126.743C230.411 136.271 221.023 142.439 210.643 142.439Z" fill="#00009F"/>
+</svg>';
+
+            $states['fluent_cart'] = '<span>' . $logo . '<span>' . $targetKeys[$targetKey] . '</span></span>';
+        }
+
+        return $states;
+
+    }
+
+    public function outputFluentCartDarkModeScript()
+    {
+        global $pagenow;
+        $page     = $_GET['page'] ?? '';
+        $postType = $_GET['post_type'] ?? '';
+
+        // post.php?post=ID&action=edit omits post_type; resolve it from the post ID.
+        if ($pagenow === 'post.php' && empty($postType)) {
+            $postId   = (int) App::request()->get('post', 0);
+            $postType = $postId ? (string) get_post_type($postId) : '';
+        }
+
+        $isFluentCartPage  = $page === 'fluent-cart';
+        $isTaxonomyList    = $pagenow === 'edit-tags.php' && $postType === FluentProducts::CPT_NAME;
+        $isTermEditPage    = $pagenow === 'term.php' && $postType === FluentProducts::CPT_NAME;
+        $isProductEditPage = ($pagenow === 'post.php' || $pagenow === 'edit.php') && $postType === FluentProducts::CPT_NAME;
+
+        if (!$isFluentCartPage && !$isTaxonomyList && !$isTermEditPage && !$isProductEditPage) {
+            return;
+        }
+
+        // Runs synchronously in <head> before any paint — applies the dark class and
+        // data-fct-theme attribute to <html> so logos and the theme icon render correctly
+        // from the very first frame, with no light-to-dark flash.
+        wp_print_inline_script_tag($this->getDarkModeInitScript());
+    }
+
+    public function enqueueDarkModeToggleForTaxonomy()
+    {
+        global $pagenow;
+        $postType = $_GET['post_type'] ?? '';
+
+        $isTaxonomyList = $pagenow === 'edit-tags.php' && $postType === FluentProducts::CPT_NAME;
+        $isTermEditPage = $pagenow === 'term.php' && $postType === FluentProducts::CPT_NAME;
+
+        if ($isTaxonomyList || $isTermEditPage) {
+            Vite::enqueueScript(
+                'fluent_cart_dark_mode_toggle',
+                'admin/dark-mode-toggle.js',
+                [],
+                FLUENTCART_VERSION,
+                true
+            );
+        }
+    }
+
+    private function getDarkModeInitScript(): string
+    {
+        return "(function(){" .
+               "var k='fluent_theme_mode',c='fluent_theme_dark'," .
+               "s=localStorage.getItem(k)||localStorage.getItem('fcart_admin_theme')," .
+               "t=s==='dark'?'dark':s==='light'?'light':'system'," .
+               "d=s==='dark'||s==='system:dark'||((!s||s==='system')&&window.matchMedia&&window.matchMedia('(prefers-color-scheme: dark)').matches);" .
+               "document.documentElement.setAttribute('data-fct-theme',t);" .
+               "if(d)document.documentElement.classList.add(c);" .
+               "})();";
+    }
+
+    public function init()
+    {
+
+        add_action('admin_menu', array($this, 'addAdminMenu'));
+        // Late, so rows added by add-ons and the Products children are grouped too.
+        add_action('admin_menu', array($this, 'groupAdminSubmenu'), 9999);
+
+        // The children under Products stay visible on every page so the
+        // sidebar never changes shape. Pro's Inventory row still hides itself
+        // with inline CSS (it relied on the admin app to reveal it), so keep
+        // that row visible whichever Pro version is installed.
+        add_action('admin_enqueue_scripts', function () {
+            wp_register_style('fluent-cart-admin-submenu', false);
+            wp_enqueue_style('fluent-cart-admin-submenu');
+            wp_add_inline_style('fluent-cart-admin-submenu', '
+                #adminmenu .toplevel_page_fluent-cart li.fluent_cart_inventory {
+                    display: list-item;
+                }
+                #adminmenu .toplevel_page_fluent-cart li.fct_menu_group_start {
+                    margin-top: 5px;
+                    padding-top: 5px;
+                    border-top: 1px solid rgba(240, 246, 252, 0.2);
+                }
+                .admin-color-light #adminmenu .toplevel_page_fluent-cart li.fct_menu_group_start {
+                    border-top-color: rgba(0, 0, 0, 0.12);
+                }
+                #adminmenu .toplevel_page_fluent-cart li.fct_menu_child a {
+                    margin-left: 8px;
+                    font-size: 90%;
+                }
+            ');
+        });
+
+        /*
+         * Disable Gutenberg for Products
+         */
+        add_filter('parent_file', function ($parent_file) {
+            global $submenu_file, $current_screen, $pagenow;
+
+            $postType = $_GET['post_type'] ?? '';
+            if ($postType == FluentProducts::CPT_NAME && $current_screen->post_type == FluentProducts::CPT_NAME) {
+                if ($pagenow == 'post.php') {
+                    $submenu_file = 'edit.php?post_type=' . $current_screen->post_type;
+                }
+
+                if ($pagenow == 'edit-tags.php') {
+                    $taxonomy = $_GET['taxonomy'] ?? '';
+                    $submenu_file = 'edit-tags.php?taxonomy=' . esc_attr($taxonomy) . '&post_type=' . $current_screen->post_type;
+                }
+
+                $parent_file = 'fluent-cart';
+            }
+
+            return $parent_file;
+        });
+
+        add_action('fluent_cart/admin_menu', array($this, 'renderAdminMenu'));
+        // add_action('in_admin_header', array($this, 'maybeRenderAdminMenu'));
+
+        add_action('edit_form_top', array($this, 'pushProductNav'));
+
+        add_action('admin_bar_menu', [$this, 'globalEnqueueAssets'], 10, 1);
+    }
+
+    public function addAdminMenu()
+    {
+        $capability = 'manage_options';
+
+        if (!current_user_can('manage_options') && App::isProActive()) {
+            $capability = PermissionManager::ADMIN_CAP;
+        }
+
+        if (!current_user_can($capability)) {
+            return;
+        }
+
+        global $submenu;
+
+        $adminMenuTitle = apply_filters('fluent_cart/admin_menu_title', 'FluentCart', []);
+
+        add_menu_page(
+            $adminMenuTitle,
+            $adminMenuTitle,
+            $capability,
+            'fluent-cart',
+            [$this, 'renderAdmin'],
+            $this->getMenuIcon(),
+            apply_filters('fluent_cart/admin_menu_position', 3)
+        );
+
+        $submenu['fluent-cart']['dashboard'] = array(
+            __('Dashboard', 'fluent-cart'),
+            $capability,
+            'admin.php?page=fluent-cart#/',
+            '',
+            'fluent_cart_dashboard'
+        );
+
+        if (PermissionManager::hasPermission(['orders/view'])) {
+            $submenu['fluent-cart']['orders'] = array(
+                __('Orders', 'fluent-cart'),
+                $capability,
+                'admin.php?page=fluent-cart#/orders',
+                '',
+                'fluent_cart_orders'
+            );
+        }
+
+        if (PermissionManager::hasPermission(['customers/view', 'customers/manage'])) {
+            $submenu['fluent-cart']['customers'] = array(
+                __('Customers', 'fluent-cart'),
+                $capability,
+                'admin.php?page=fluent-cart#/customers',
+                '',
+                'fluent_cart_customers'
+            );
+        }
+
+        if (PermissionManager::hasPermission(['products/view'])) {
+            $submenu['fluent-cart']['products'] = array(
+                __('Products', 'fluent-cart'),
+                $capability,
+                'admin.php?page=fluent-cart#/products',
+                '',
+                'fluent_cart_products'
+            );
+        }
+
+        if (PermissionManager::hasPermission(['subscriptions/view'])) {
+            $submenu['fluent-cart']['subscriptions'] = array(
+                __('Subscriptions', 'fluent-cart'),
+                $capability,
+                'admin.php?page=fluent-cart#/subscriptions',
+                '',
+                'fluent_cart_subscriptions'
+            );
+        }
+
+        if (PermissionManager::hasPermission(['reports/view'])) {
+            $submenu['fluent-cart']['reports'] = array(
+                __('Reports', 'fluent-cart'),
+                $capability,
+                'admin.php?page=fluent-cart#/reports/overview',
+                '',
+                'fluent_cart_reports'
+            );
+        }
+
+        if (PermissionManager::userCan('is_super_admin')) {
+            $submenu['fluent-cart']['integrations'] = array(
+                __('Integrations', 'fluent-cart'),
+                $capability,
+                'admin.php?page=fluent-cart#/integrations',
+                '',
+                'fluent_cart_integrations'
+            );
+        }
+
+
+        $hasSensitiveAccess = PermissionManager::hasPermission(['store/settings', 'store/sensitive']);
+
+        if ($hasSensitiveAccess) {
+            $submenu['fluent-cart']['settings'] = array(
+                __('Settings', 'fluent-cart'),
+                $capability,
+                'admin.php?page=fluent-cart#/settings/store-settings/',
+                '',
+                'fluent_cart_settings'
+            );
+        }
+
+        if (PermissionManager::hasPermission(['coupons/manage', 'coupons/view'])) {
+            $submenu['fluent-cart']['coupons'] = array(
+                __('Coupons', 'fluent-cart'),
+                $capability,
+                'admin.php?page=fluent-cart#/coupons',
+                '',
+                'fluent_cart_coupons'
+            );
+        }
+
+        if ($hasSensitiveAccess && TaxModule::isTaxEnabled()) {
+            $submenu['fluent-cart']['taxes'] = array(
+                __('Taxes', 'fluent-cart'),
+                $capability,
+                'admin.php?page=fluent-cart#/taxes',
+                '',
+                'fluent_cart_taxes'
+            );
+        }
+
+
+        if (PermissionManager::hasPermission(['products/create', 'products/edit'])) {
+            $taxonomies = get_taxonomies([
+                'object_type' => [FluentProducts::CPT_NAME],
+                'public'      => true,
+            ], 'object');
+
+            foreach ($taxonomies as $key => $taxonomy) {
+                $menuUrl = 'edit-tags.php?taxonomy=' . $taxonomy->name . '&post_type=' . FluentProducts::CPT_NAME;
+                $submenu['fluent-cart'][$key] = [
+                    $taxonomy->label,
+                    $capability,
+                    $menuUrl,
+                    '',
+                    $taxonomy->name
+                ];
+            }
+        }
+
+        if (PermissionManager::userCan('is_super_admin')) {
+            $submenu['fluent-cart']['logs'] = array(
+                __('Logs', 'fluent-cart'),
+                $capability,
+                'admin.php?page=fluent-cart#/logs',
+                '',
+                'fluent_cart_logs'
+            );
+        }
+
+        do_action('fluent_cart/admin_submenu_added', $submenu);
+    }
+
+    public function groupAdminSubmenu()
+    {
+        global $submenu;
+
+        if (empty($submenu['fluent-cart'])) {
+            return;
+        }
+
+        $submenu['fluent-cart'] = $this->groupSubmenu($submenu['fluent-cart']);
+    }
+
+    /**
+     * Order the FluentCart submenu by group, drop the rows the in-app top bar
+     * already links to, and mark the first visible row of each group after the
+     * first, which the admin CSS draws a divider above.
+     *
+     * @param array $items $submenu['fluent-cart'] rows, keyed by slug or index.
+     * @return array
+     */
+    public function groupSubmenu(array $items)
+    {
+        // '__taxonomies' places the public product taxonomies, which only the sidebar links to.
+        $groups = apply_filters('fluent_cart/admin_menu/submenu_groups', [
+            'overview' => ['dashboard', 'reports'],
+            'sales'    => ['orders', 'customers', 'subscriptions'],
+            'catalog'  => ['products', 'attributes', 'inventory', 'reviews', '__taxonomies', 'coupons'],
+            'config'   => ['integrations', 'settings'],
+            'tools'    => ['migrator', 'logs'],
+        ]);
+
+        // Only rows the top bar links to are hidden; a site that turns the top
+        // bar off keeps them, or the sidebar is left as their only way in and
+        // they would have none.
+        $hidden = apply_filters('fluent_cart/show_admin_top_bar', true)
+            ? ['attributes', 'inventory', 'reviews', 'product_feed', 'taxes', 'logs']
+            : [];
+
+        $hidden = apply_filters('fluent_cart/admin_menu/hidden_submenu_items', $hidden);
+
+        $taxonomies = [];
+        $taxonomyPrefix = 'edit-tags.php?taxonomy=';
+        $productTaxonomySuffix = '&post_type=' . FluentProducts::CPT_NAME;
+
+        foreach ($items as $key => $item) {
+            if (in_array($key, $hidden, true)) {
+                unset($items[$key]);
+                continue;
+            }
+
+            $url = (string)($item[2] ?? '');
+            if (strpos($url, $taxonomyPrefix) === 0 && substr($url, -strlen($productTaxonomySuffix)) === $productTaxonomySuffix) {
+                $taxonomies[$key] = $item;
+                unset($items[$key]);
+            }
+        }
+
+        // Rows no group claims get their own group, before Tools.
+        $order = array_keys($groups);
+        $toolsAt = array_search('tools', $order, true);
+        array_splice($order, $toolsAt === false ? count($order) : $toolsAt, 0, ['__other']);
+
+        $buckets = array_fill_keys($order, []);
+
+        foreach ($groups as $group => $keys) {
+            foreach ($keys as $key) {
+                if ($key === '__taxonomies') {
+                    $buckets[$group] += $taxonomies;
+                    $taxonomies = [];
+                } elseif (isset($items[$key])) {
+                    $buckets[$group][$key] = $items[$key];
+                    unset($items[$key]);
+                }
+            }
+        }
+
+        $buckets['__other'] += $taxonomies + $items;
+
+        $children = ['attributes', 'inventory', 'reviews', 'product_feed'];
+
+        $grouped = [];
+        $isFirstGroup = true;
+        foreach ($buckets as $rows) {
+            $marked = false;
+            foreach ($rows as $key => $row) {
+                if (in_array($key, $children, true)) {
+                    // Pro and the feed add-on still prefix their labels with "↳".
+                    $row[0] = preg_replace('/^↳\s*/u', '', $row[0]);
+                    $row[4] = trim(($row[4] ?? '') . ' fct_menu_child');
+                }
+
+                // WordPress skips rows the user can't see, so the divider goes on the first visible one.
+                if (!$marked && current_user_can($row[1])) {
+                    if (!$isFirstGroup) {
+                        $row[4] = trim(($row[4] ?? '') . ' fct_menu_group_start');
+                    }
+                    $marked = true;
+                    $isFirstGroup = false;
+                }
+                $grouped[$key] = $row;
+            }
+        }
+
+        return $grouped;
+    }
+
+    public function renderAdmin()
+    {
+        (new StoreSettings())->syncCustomerDashboardPageSlug();
+
+        if (function_exists('wp_enqueue_editor')) {
+            wp_enqueue_editor();
+            wp_tinymce_inline_scripts();
+            wp_enqueue_media();
+        }
+
+        $this->enqueueAssets();
+
+        $config = App::getInstance('config');
+
+        $name = $config->get('app.name');
+
+        $slug = $config->get('app.slug');
+
+        $baseUrl = apply_filters('fluent_connector_base_url', admin_url('admin.php?page=newproject#/'));
+
+        $app = App::getInstance();
+        $assets = $app['url.assets'];
+
+        App::make('view')->render('admin.admin_app', [
+            'name'    => $name,
+            'slug'    => $slug,
+            'baseUrl' => $baseUrl,
+            'logo'    => $assets . 'images/logo.svg',
+        ]);
+    }
+
+    public function maybeRenderAdminMenu()
+    {
+        $postType = $_GET['post_type'] ?? '';
+        if ($postType == FluentProducts::CPT_NAME && is_admin()) {
+            AdminHelper::getAdminMenu(true);
+            AdminHelper::pushGlobalAdminAssets();
+        }
+    }
+
+    public function renderAdminMenu()
+    {
+        if (!apply_filters('fluent_cart/show_admin_top_bar', true)) {
+            return;
+        }
+        AdminHelper::getAdminMenu(true);
+    }
+
+    public function pushProductNav($post)
+    {
+        if (!$post || $post->post_type != FluentProducts::CPT_NAME) {
+            return;
+        }
+
+        AdminHelper::getProductMenu($post->ID, true, 'product_edit');
+        AdminHelper::pushGlobalAdminAssets();
+    }
+
+    public function enqueueAssets()
+    {
+        $app = App::getInstance();
+
+        $slug = $app->config->get('app.slug');
+
+        do_action('fluent_cart/loading_app', $app);
+
+        //This should be done before enqueueing the global script.
+        // wp-i18n backs the admin translator (resources/admin/utils/translator/Translator.js).
+        Vite::enqueueScript($slug . '_admin_app_start', 'admin/bootstrap/app.js', [$slug . '_global_admin_hooks', 'wp-i18n']);
+
+        //Don't register this script using vite.
+        if (!wp_script_is('wp-hooks', 'registered')) {
+            $suffix = (defined('SCRIPT_DEBUG') && SCRIPT_DEBUG) ? '' : '.min';
+            wp_register_script('wp-hooks', includes_url('js/dist/hooks' . $suffix . '.js'),  ['wp-polyfill'],   FLUENTCART_VERSION, true);
+        }
+        if (!wp_script_is('wp-hooks', 'enqueued')) {
+            wp_enqueue_script('wp-hooks');
+        }
+
+        wp_enqueue_script($slug . '_global_admin_hooks', Vite::getEnqueuePath('admin/admin_hooks.js'), ['wp-hooks'], FLUENTCART_VERSION, true);
+
+        $manager = GatewayManager::getInstance();
+        $payment_routes = $manager->getRoutes();
+//        $payment_routes = apply_filters('fluent_cart/payments/payment_method_settings_routes', []);
+
+        $storage_driver_routes = apply_filters('fluent_cart/storage/storage_driver_settings_routes', [], []);
+
+        $settings = new StoreSettings();
+        $checkoutUrl = add_query_arg(Helper::INSTANT_CHECKOUT_URL_PARAM, '=', $settings->getCheckoutPage());
+        $restVars = Helper::getRestInfo();
+        $hasDataMigrations = current_user_can('manage_options') && DataBackfills::hasPending();
+
+        $filterOptions = [
+            'order_filter_options'    => OrderFilter::getTableFilterOptions(),
+            'customer_filter_options' => CustomerFilter::getTableFilterOptions(),
+            'product_filter_options'  => ProductFilter::getTableFilterOptions(),
+            'license_filter_options'      => LicenseFilter::getTableFilterOptions(),
+            'license_site_filter_options' => LicenseSiteFilter::getTableFilterOptions(),
+            'tax_filter_options'          => TaxFilter::getTableFilterOptions(),
+            'review_filter_options'       => ReviewFilter::getTableFilterOptions(),
+        ];
+        $filterOptions = apply_filters('fluent_cart/admin_filter_options', $filterOptions, []);
+
+        // Structured table config keyed by table name (used by Table.js base class)
+        $tableConfig = [
+            'order_table'         => ['filters' => Arr::get($filterOptions, 'order_filter_options', [])],
+            'customers'           => ['filters' => Arr::get($filterOptions, 'customer_filter_options', [])],
+            'product_table'       => ['filters' => Arr::get($filterOptions, 'product_filter_options', [])],
+            'licenses'            => ['filters' => Arr::get($filterOptions, 'license_filter_options', [])],
+            'license_sites'       => ['filters' => Arr::get($filterOptions, 'license_site_filter_options', [])],
+            'taxes_table'         => ['filters' => Arr::get($filterOptions, 'tax_filter_options', [])],
+            'subscriptions'       => ['filters' => Arr::get($filterOptions, 'subscription_filter_options', [])],
+            'shipping_zone_table' => ['filters' => Arr::get($filterOptions, 'shipping_zone_filter_options', [])],
+            'review_table'        => ['filters' => Arr::get($filterOptions, 'review_filter_options', [])],
+            // The Order Sources report filters orders, so its advanced-filter UI
+            // reuses the Orders filter vocabulary rather than defining its own.
+            'source_report'       => ['filters' => Arr::get($filterOptions, 'order_filter_options', [])],
+        ];
+
+        // Tables that declare sort options on their filter class but carry no
+        // filter-options entry above: the Sort popover still needs them, and
+        // they are what `fluent_cart/{filterName}_table_sorts` feeds.
+        $sortOnlyTables = [
+            'coupon_table'         => CouponFilter::class,
+            'log_table'            => LogFilter::class,
+            'order_bump_table'     => OrderBumpFilter::class,
+            'shipping_class_table' => ShippingClassFilter::class,
+            'shipping_zone_table'  => ShippingZoneFilter::class,
+        ];
+
+        foreach ($sortOnlyTables as $tableName => $filterClass) {
+            if (empty($tableConfig[$tableName]['filters']['sorts'])) {
+                $tableConfig[$tableName]['filters']['sorts'] = call_user_func([$filterClass, 'getSortOptions']);
+            }
+        }
+
+        $tableConfig = apply_filters('fluent_cart/admin_table_saved_views', $tableConfig, [
+            'filterOptions' => $filterOptions
+        ]);
+
+        $currentUser = get_user_by('ID', get_current_user_id());
+
+        // Get app config and merge additional properties into it
+        $appConfig = $app->config->get('app');
+        $appConfig['version'] = FLUENTCART_VERSION;
+        $appConfig['permissions'] = PermissionManager::getUserPermissions();
+        $appConfig['isProActive'] = App::isProActive();
+        $appConfig['proVersion'] = defined('FLUENTCART_PRO_PLUGIN_VERSION') ? FLUENTCART_PRO_PLUGIN_VERSION : null;
+        // Customer Rights 1.0.0 ships its own withdrawal screen; older releases expected core's.
+        $appConfig['customerRightsUpdate'] = defined('FLUENT_CART_CUSTOMER_RIGHTS_VERSION')
+            && version_compare(FLUENT_CART_CUSTOMER_RIGHTS_VERSION, '1.0.0', '<')
+            ? ['installed' => FLUENT_CART_CUSTOMER_RIGHTS_VERSION, 'required' => '1.0.0']
+            : null;
+        $appConfig['fluentPlayer'] = FluentPlayerBridge::adminAppConfig();
+
+        $appConfig['logos'] = [
+            'dark'  => Vite::getAssetUrl('images/logo/logo-full-dark.svg'),
+            'light' => Vite::getAssetUrl('images/logo/logo-full.svg'),
+        ];
+        $appConfig['isModuleTabEnabled'] = $settings->isModuleTabEnabled();
+        $appConfig['upgrade_url'] = Helper::getUpgradeUrl();
+
+        $max_upload_size = wp_max_upload_size(); // Returns size in bytes
+        $adminLocalizeData = apply_filters('fluent_cart/admin_app_data', [
+            'app_config'                       => $appConfig,
+            'slug'                             => $app->config->get('app.slug'),
+            'admin_url'                        => admin_url('admin.php?page=fluent-cart#/'),
+            'wp_admin_url'                     => rtrim(admin_url(), '/'),
+            'frontend_url'                     => URL::getFrontEndUrl(''),
+            'nonce'                            => wp_create_nonce($slug),
+            'rest'                             => $restVars,
+            'brand_logo'                       => $this->getMenuIcon(),
+            'asset_url'                        => Vite::getAssetUrl(),
+            'me'                               => [
+                'id'        => $currentUser->ID,
+                'full_name' => trim($currentUser->display_name),
+                'email'     => $currentUser->user_email,
+                'avatar'    => get_avatar_url($currentUser->ID)
+            ],
+            'shop'                             => Helper::shopConfig(),
+            'product_statuses'                 => Status::getProductStatuses(),
+            'total_products_count'             => Product::query()->count(),
+            'payment_statuses'                 => Status::getEditableTransactionStatuses(true),
+            'payment_routes'                   => $payment_routes,
+            'storage_driver_routes'            => $storage_driver_routes,
+            'editable_payment_statuses'        => Status::getEditableTransactionStatuses(true),
+            'order_statuses'                   => Status::getOrderStatuses(),
+            'editable_order_statuses'          => Status::getEditableOrderStatuses(),
+            'editable_customer_statuses'       => Status::getEditableCustomerStatuses(),
+            // Backward compat: keep the old typo'd keys for existing frontend code
+            'order_statues'                    => Status::getOrderStatuses(),
+            'editable_order_statues'           => Status::getEditableOrderStatuses(),
+            'editable_customer_statues'        => Status::getEditableCustomerStatuses(),
+            'shipping_statuses'                => Status::getShippingStatuses(),
+            // Hand-settable subset only: `partially_shipped` is derived from the
+            // shipment records, so it must never appear in a status dropdown.
+            'editable_shipping_statuses'       => Status::getEditableShippingStatuses(),
+            // Per-shipment lifecycle, distinct from the order's shipping_status.
+            'shipment_statuses'                => Shipment::getStatuses(),
+            // Attribute library powering the Advanced Variation feature.
+            'variation_attributes'             => AttributeGroup::with(['terms'])->get(),
+            'variation_terms'                  => AttributeTerm::query()->get()->keyBy('id'),
+            'product_image_base_uri'           => Helper::getProductImageBaseUri(),
+            'add_on_modules'                   => AddOnModule::showAddOns(),
+            // Product edit notice; the add-on list is only built when a builder lacks its add-on.
+            'builder_addons'                   => self::getBuilderAddons(),
+            'stock_statuses'                   => Status::getStockStatuses(),
+            'fulfillment_types'                => Helper::getFulfilmentTypes(),
+            'variation_types'                  => Helper::getVariationTypes(),
+            'trans'                            => TransStrings::getStrings(),
+            'dashboard_url'                    => admin_url('admin.php?page=fluent-cart#'),
+            'checkout_url'                     => $checkoutUrl,
+            'dummy_product_info'               => apply_filters('fluent_cart/dummy_product_info', []) ?: [],
+            'currency_signs'                   => CurrenciesHelper::getCurrencySigns(),
+            'currency_decimals'                => Money::getDecimalsMap(),
+            'filter_options'                   => $filterOptions,
+            'table_config'                     => $tableConfig,
+            'receipt_page_url'                 => $settings->getReceiptPage(),
+            'payment_logos'                    => PaymentMethods::getIcons(),
+            'is_admin_bar_showing'             => is_admin_bar_showing(),
+            'max_upload_size'                  => size_format($max_upload_size),
+            'available_shipping_method_count'  => ShippingMethod::query()->where('is_enabled', '1')->count(),
+            'is_tax_enabled'                   => TaxModule::isTaxEnabled(),
+            'eu_vat_county_options'            => TaxModule::euVatCountyOptions(),
+            'country_tax_titles'               => TaxModule::taxTitleLists(),
+            'site_url'                         => site_url(),
+            'store_logo'                       => (new \FluentCart\Api\StoreSettings())->get('store_logo.url', ''),
+            'modules_settings'                 => ModuleSettings::getAllSettings(),
+            'purchase_fluent_cart_link'        => 'https://fluentcart.com/',
+            'admin_notices'                    => apply_filters('fluent_cart/admin_notices', []),
+            // POSTs data-backfills/run until done; endpoint requires manage_options
+            'has_data_migrations'              => $hasDataMigrations,
+            'subscription_intervals'           => Helper::getAvailableSubscriptionIntervalOptions(),
+
+            'datei18'               => DayjsFormatter::localizedStrings(),
+            'el_strings'            => TransStrings::elStrings(),
+            'wp_locale'             => get_locale(),
+            'is_full_name_required' => CheckoutFieldsSchema::isFullNameRequired(),
+            'business_details'      => [
+                'company_name' => [
+                    'enabled'  => CheckoutFieldsSchema::isCompanyNameEnabled(),
+                    'required' => CheckoutFieldsSchema::isCompanyNameRequired(),
+                ],
+                'vat_number' => [
+                    'enabled'  => CheckoutFieldsSchema::isVatNumberEnabled(),
+                    'required' => CheckoutFieldsSchema::isVatNumberRequired(),
+                ],
+                'legal_registration_id' => [
+                    'enabled'  => CheckoutFieldsSchema::isLegalRegistrationIdEnabled(),
+                    'required' => CheckoutFieldsSchema::isLegalRegistrationIdRequired(),
+                ],
+            ],
+            'fct_editor_frame'      => '',
+        ]);
+
+        wp_localize_script($slug . '_admin_app_start', 'fluentCartAdminApp', $adminLocalizeData);
+
+        wp_localize_script($slug . '_admin_app_start', 'fluentCartRestVars', [
+            'rest' => $restVars,
+        ]);
+
+        do_action('fluent_cart/admin_js_loaded', $app);
+    }
+
+    public function globalEnqueueAssets($adminBar)
+    {
+        if (function_exists('get_current_screen')) {
+            $screen = get_current_screen();
+        } else {
+            $screen = null;
+        }
+
+        if ($screen && $screen->base !== 'user-edit') {
+            return;
+        }
+
+        $app = App::getInstance();
+
+        $slug = $app->config->get('app.slug');
+        if (is_admin()) {
+            wp_enqueue_script($slug . '_edit_wp_user_admin_global_js', Vite::getEnqueuePath('admin/utils/edit-wp-user-global.js'), ['jquery'], FLUENTCART_VERSION, true);
+        }
+
+
+        $baseUrl = apply_filters('fluent_cart/admin_base_url', admin_url('admin.php?page=fluent-cart#/'), []);
+
+        $editingUserVars = null;
+
+        if (function_exists('get_current_screen')) {
+            $currentScreen = get_current_screen();
+            if ($currentScreen && $currentScreen->id == 'user-edit') {
+                $userId = (int)($_GET['user_id'] ?? 0);
+                $user = get_user_by('ID', $userId);
+
+                if ($userId && $user) {
+                    $fluentcartProfile = Customer::query()->where('email', $user->user_email)
+                        ->orWhere('user_id', $user->ID)
+                        ->first();
+                    if ($fluentcartProfile) {
+                        $fluentcartProfileUrl = $baseUrl . 'customers/' . $fluentcartProfile->id . '/view';
+                        $editingUserVars = [
+                            'user_id'         => $userId,
+                            'fct_profile_id'  => $fluentcartProfile->id,
+                            'fct_profile_url' => $fluentcartProfileUrl
+                        ];
+                    }
+                }
+            }
+        }
+        wp_localize_script('fluent-cart_edit_wp_user_admin_global_js', 'fluentcart_edit_user_global_bar_vars', [
+            'customer_base'  => $baseUrl . 'customers/',
+            'edit_user_vars' => $editingUserVars
+        ]);
+    }
+
+    protected function getMenuIcon(): string
+    {
+        $svg = '<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100" viewBox="0 0 100 100" fill="none">
+            <g clip-path="url(#clip0_394_8994)">
+            <path d="M90 0C95.5229 0 100 4.47715 100 10V90C100 95.5229 95.5229 100 90 100H10C4.47715 100 0 95.5229 0 90V10C0 4.47715 4.47715 0 10 0H90ZM28.3525 52.5986C24.8927 52.5988 21.7641 54.6544 20.3906 57.8301L15.7119 68.6484H45.5205C52.4408 68.6484 58.6996 64.5355 61.4463 58.1836L63.8613 52.5986H28.3525ZM46.6748 31.333C39.7545 31.333 33.4959 35.4459 30.749 41.7979L28.333 47.3828H70.2617C73.7217 47.3828 76.8513 45.3264 78.2246 42.1504L82.9023 31.333H46.6748Z" fill="#9CA1A8"/>
+            </g>
+            <defs>
+            <clipPath id="clip0_394_8994">
+            <rect width="100" height="100" fill="white"/>
+            </clipPath>
+            </defs>
+        </svg>';
+
+        return 'data:image/svg+xml;base64,' . base64_encode($svg);
+    }
+
+
+    private static function getBuilderAddons()
+    {
+        $missing = AddonManager::getBuilderSignals();
+        if (!$missing) {
+            return [];
+        }
+
+        return AddonManager::pickBuilderAddons((new ModuleSettingsController())->getRegisteredPluginAddons(), $missing);
+    }
+}

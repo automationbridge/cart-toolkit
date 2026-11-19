@@ -1,0 +1,1088 @@
+<?php
+
+namespace FluentCart\App\Helpers;
+
+use FluentCart\App\Modules\MultiCurrency\Services\StorefrontPrice;
+use FluentCart\Api\CurrencySettings;
+use FluentCart\Api\Resource\FrontendResource\CartResource;
+use FluentCart\App\App;
+use FluentCart\App\Models\Cart;
+use FluentCart\App\Models\Customer;
+use FluentCart\App\Models\Product;
+use FluentCart\App\Models\ProductVariation;
+use FluentCart\App\Models\ShippingClass;
+use FluentCart\App\Models\ShippingMethod;
+use FluentCart\App\Services\CheckoutService;
+use FluentCart\App\Services\Shipments\BoxPacker;
+use FluentCart\App\Services\Money;
+use FluentCart\App\Services\URL;
+use FluentCart\Framework\Support\Arr;
+
+class CartHelper
+{
+    const MAX_QUANTITY = 100000;
+
+    const QUANTITY_HARD_LIMIT = 10000000;
+
+    // Product and class rows one method and item set read, reused within a request.
+    private static $chargeLookupFingerprint = null;
+
+    private static $chargeProducts = null;
+
+    private static $chargeShippingClasses = null;
+
+    public static function resetChargeLookupCache()
+    {
+        static::$chargeLookupFingerprint = null;
+        static::$chargeProducts = null;
+        static::$chargeShippingClasses = null;
+    }
+
+    /**
+     * The ceiling is what keeps `unit_price * quantity` inside PHP's integer range —
+     * without one the product overflows to a float and casts back to a wrapped total.
+     * Cart updates send a signed delta, so those allow the negative side too.
+     */
+    public static function validateQuantity($quantity, $isDelta = false)
+    {
+        if (!is_numeric($quantity)) {
+            return self::invalidQuantityError();
+        }
+
+        $max = static::maxQuantity();
+        $value = (float)$quantity;
+        $min = $isDelta ? -$max : 1;
+
+        if ($value != floor($value) || $value < $min || $value > $max) {
+            return self::invalidQuantityError();
+        }
+
+        return null;
+    }
+
+    public static function maxQuantity()
+    {
+        /**
+         * Filter the highest quantity a single cart line accepts.
+         *
+         * Return a whole number of one or more. The value is a safety ceiling, not just
+         * a storefront preference: it is what keeps a line's price multiplication inside
+         * PHP's integer range. A value that cannot serve that purpose is ignored — a
+         * non-numeric or fractional value falls back to the default, and anything above
+         * QUANTITY_HARD_LIMIT is capped there.
+         *
+         * @param int $maxQuantity Highest accepted quantity for one cart line.
+         */
+        $max = apply_filters('fluent_cart/cart/max_quantity', self::MAX_QUANTITY);
+
+        if (!is_numeric($max) || (float)$max != floor((float)$max) || $max < 1) {
+            return self::MAX_QUANTITY;
+        }
+
+        return (int)min($max, self::QUANTITY_HARD_LIMIT);
+    }
+
+    private static function invalidQuantityError()
+    {
+        /* translators: %d: the highest quantity a single cart line accepts. */
+        $message = __('Please enter a product quantity between 1 and %d.', 'fluent-cart');
+
+        return new \WP_Error('invalid_cart_quantity', sprintf($message, static::maxQuantity()));
+    }
+
+    public static function getCart($hash = null, $create = false)
+    {
+        return CartResource::get([
+            'hash'   => $hash ?? App::request()->get(Helper::INSTANT_CHECKOUT_URL_PARAM),
+            'create' => $create
+        ]);
+    }
+
+    public static function generateCartItemFromVariation(ProductVariation $variation, $quantity = 1): array
+    {
+        $mediaUrl = $variation->thumbnail ?: $variation->product->thumbnail;
+
+        //  $shippingCharge = static::calculateShippingCharge($variation, $quantity);
+
+        $itemPrice = apply_filters('fluent_cart/cart/item_price', $variation->item_price, [
+            'variation' => $variation,
+            'quantity'  => $quantity,
+        ]);
+
+        // Ensure filtered price is a valid non-negative integer (cents)
+        $itemPrice = max(0, (int)$itemPrice);
+
+        $subtotal = $itemPrice * $quantity;
+
+        //Need to test and check this toArray Issue
+        $data = wp_parse_args([
+            'quantity'             => $quantity,
+            'price'                => $itemPrice,
+            'unit_price'           => $itemPrice,
+            'line_total'           => $itemPrice * $quantity,
+            'subtotal'             => $subtotal,
+            'discount_total'       => 0,
+            'tax_total'            => 0,
+            'line_total_formatted' => CurrencySettings::getFormattedPrice($subtotal),
+            'object_id'            => $variation->id,
+            'title'                => $variation->variation_title,
+            'post_title'           => $variation->product->post_title,
+            'coupon_discount'      => 0,
+            'cost'                 => $variation->item_cost ?? 0,
+            'featured_media'       => $mediaUrl,
+            'view_url'             => URL::appendQueryParams(
+                $variation->product->view_url,
+                [
+                    'selected' => $variation->id
+                ]
+            ),
+            // Property access lazy-loads when callers didn't eager-load
+            // product_detail (instant-checkout, cart update endpoint) so
+            // CartRenderer can read variation_type to toggle the
+            // variant-title-hidden class on simple products.
+            'variation_type'       => $variation->product_detail ? $variation->product_detail->variation_type : '',
+            'is_custom'            => false,
+        ], $variation->toArray());
+
+        $cartItem = Arr::only($data, [
+            'id',
+            'object_id',
+            'post_id',
+            'quantity',
+            'post_title',
+            'title',
+            'price',
+            'unit_price',
+            'coupon_discount',
+            'fulfillment_type',
+            'featured_media',
+            'other_info',
+            'cost',
+            'view_url',
+            'line_total_formatted',
+            'line_total',
+            'subtotal',
+            'total',
+            'variation_type',
+            'is_custom'
+        ]);
+
+        //  $cartItem['shipping_charge'] = $shippingCharge;
+
+        // Snapshot the variant's attribute set (pa_* + third-party) into
+        // other_info so cart, checkout and the resulting order item all carry a
+        // frozen attribute map that survives later attribute-library renames.
+        $otherInfo = Arr::get($cartItem, 'other_info', []);
+        if (!is_array($otherInfo)) {
+            $otherInfo = [];
+        }
+        $otherInfo['item_attributes'] = AttributeHelper::getProductItemAttributes(
+            $variation->id,
+            $variation->post_id
+        );
+        $cartItem['other_info'] = $otherInfo;
+
+        return $cartItem;
+    }
+
+    public static function generateCartItemCustomItem(array $variation, $quantity = 1): array
+    {
+        //Need to test and check this toArray Issue
+        $data = wp_parse_args(
+            [
+                'quantity'       => $quantity,
+                'price'          => Arr::get($variation, 'item_price'),
+                'unit_price'     => Arr::get($variation, 'item_price'),
+                'object_id'      => Arr::get($variation, 'id'),
+                'tax_amount'     => Arr::get($variation, 'tax_amount', 0),
+                'title'          => Arr::get($variation, 'variation_title'),
+                'post_title'     => Arr::get($variation, 'post_title'),
+                'cost'           => Arr::get($variation, 'item_cost', 0),
+                'featured_media' => Arr::get($variation, 'featured_media'),
+                'view_url'       => Arr::get($variation, 'view_url'),
+                'variation_type' => Arr::get($variation, 'variation_type'),
+                'is_custom'      => Arr::get($variation, 'is_custom', false),
+            ],
+            $variation
+        );
+
+        $manualDiscount = Arr::get($data, 'manual_discount', 0);
+        $couponDiscount = Arr::get($data, 'coupon_discount', 0);
+        $discountTotal = $manualDiscount + $couponDiscount;
+        $itemPrice = Arr::get($data, 'item_price', 0);
+        if (!is_numeric($itemPrice)) {
+            $itemPrice = 0;
+        }
+        $subtotal = $itemPrice * Arr::get($data, 'quantity');
+
+        $data['subtotal'] = $subtotal;
+        $data['manual_discount'] = $manualDiscount;
+        $data['coupon_discount'] = $couponDiscount;
+        $data['discount_total'] = $discountTotal;
+        $data['line_total'] = $subtotal - $discountTotal;
+
+        $cartItem = Arr::only($data, [
+            'id',
+            'object_id',
+            'post_id',
+            'quantity',
+            'post_title',
+            'title',
+            'price',
+            'unit_price',
+            'manual_discount',
+            'coupon_discount',
+            'discount_total',
+            'fulfillment_type',
+            'featured_media',
+            'other_info',
+            'cost',
+            'view_url',
+            'line_total',
+            'subtotal',
+            'total',
+            'variation_type',
+            'is_custom'
+        ]);
+
+        return $cartItem;
+    }
+
+    public static function calculateShippingCharge(ProductVariation $variation, int $quantity = 1)
+    {
+
+        if ($variation->fulfillment_type !== 'physical') {
+            return 0;
+        }
+
+        $shippingClass = $variation->shippingClass;
+
+        if (!$shippingClass) {
+            return 0;
+        }
+
+        $factor = empty($shippingClass->per_item) ? 1 : $quantity;
+        if ($shippingClass->type === 'percentage') {
+            return Money::roundIfZeroDecimal(($shippingClass->cost / 100) * $variation->item_price * $factor, (string) CurrencySettings::get('currency'));
+        }
+
+        return ($shippingClass->cost * 100) * $factor;
+    }
+
+    public static function itemHasFreeShipping($item): bool
+    {
+        return Arr::get($item, 'other_info.free_shipping', 'no') === 'yes';
+    }
+
+    private static function excludeFreeShippingPhysicalItems(array &$items, array &$physicalItems): void
+    {
+        foreach ($physicalItems as $key => $item) {
+            if (self::itemHasFreeShipping($item)) {
+                $items[$key]['shipping_charge'] = 0;
+                $items[$key]['itemwise_shipping_charge'] = 0;
+                unset($physicalItems[$key]);
+            }
+        }
+    }
+
+    /**
+     * Whether the method can ship these items: a per-weight method needs a tier
+     * covering their weight. Every other rate type always covers.
+     */
+    public static function shippingMethodCoversItems(ShippingMethod $method, array $items): bool
+    {
+        $settings = Arr::wrap($method->settings);
+        if ($method->type === 'free_shipping' || Arr::get($settings, 'configure_rate') !== 'per_weight') {
+            return true;
+        }
+
+        $physicalItems = (new CheckoutService($items))->physicalItems;
+        self::excludeFreeShippingPhysicalItems($items, $physicalItems);
+        if (!$physicalItems) {
+            return true;
+        }
+
+        return self::findWeightTier(Arr::get($settings, 'weight_tiers', []), self::physicalItemsWeight($physicalItems)) !== null;
+    }
+
+    /**
+     * Content weight plus each package's weight once per box BoxPacker uses, in the store weight unit.
+     * Same packing as the carrier quotes, so a zone rate and a live rate weigh a cart alike.
+     */
+    private static function physicalItemsWeight(array $physicalItems): float
+    {
+        $storeWeightUnit = Helper::shopConfig('weight_unit') ?: 'kg';
+
+        // Batch-load all variations to avoid N+1
+        $variationIds = array_filter(array_map(function ($item) {
+            return Arr::get($item, 'object_id', Arr::get($item, 'variation_id'));
+        }, $physicalItems));
+        $variationsMap = $variationIds ? ProductVariation::query()->whereIn('id', $variationIds)->get()->keyBy('id') : new \FluentCart\Framework\Support\Collection();
+
+        $lines = [];
+        foreach ($physicalItems as $item) {
+            $variationId = Arr::get($item, 'object_id', Arr::get($item, 'variation_id'));
+            $variation = $variationId ? $variationsMap->get($variationId) : null;
+            if (!$variation) {
+                continue;
+            }
+
+            $otherInfo = $variation->other_info ?: [];
+            $packageSlug = (string) Arr::get($otherInfo, 'package_slug', '');
+            $package = Helper::getPackageBySlug($packageSlug);
+            $packageWeightUnit = $package ? Arr::get($package, 'weight_unit', $storeWeightUnit) : $storeWeightUnit;
+
+            $lines[] = [
+                'content_weight' => Helper::convertWeight(
+                    floatval(Arr::get($otherInfo, 'weight', 0)),
+                    Arr::get($otherInfo, 'weight_unit', $storeWeightUnit),
+                    $storeWeightUnit
+                ),
+                'qty'            => Arr::get($item, 'quantity', 1),
+                'box'            => [
+                    // The package a blank or stale slug falls back to, so its tare counts once.
+                    'key'        => $package ? (string) Arr::get($package, 'slug', $packageSlug) : $packageSlug,
+                    'tare'       => $package ? Helper::convertWeight(floatval(Arr::get($package, 'weight', 0)), $packageWeightUnit, $storeWeightUnit) : 0,
+                    'max_weight' => $package ? Helper::convertWeight(floatval(Arr::get($package, 'max_weight', 0)), $packageWeightUnit, $storeWeightUnit) : 0,
+                ],
+            ];
+        }
+
+        // Rounded so a split box's float noise cannot cross a tier boundary.
+        return round(BoxPacker::totalWeight($lines), 6);
+    }
+
+    /**
+     * The first tier with min <= weight <= max; a max of 0 is unlimited.
+     */
+    private static function findWeightTier($tiers, float $weight): ?array
+    {
+        foreach ((array) $tiers as $tier) {
+            $min = floatval(Arr::get($tier, 'min', 0));
+            $max = floatval(Arr::get($tier, 'max', 0));
+
+            if ($weight >= $min && ($max <= 0 || $weight <= $max)) {
+                return (array) $tier;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Class surcharge per physical line, keyed like $physicalItems; the lines add up to the
+     * class total. A class without per_item charges once per class: a fixed cost on its first
+     * line, a percentage of its highest unit price on that line.
+     * highest_class keeps only the lines of the class with the largest total.
+     */
+    private static function lineClassCharges(array $physicalItems, $products, $shippingClasses, $classAggregation): array
+    {
+        $lineCharges = [];
+        $classTotals = [];
+        $classLines = [];
+        $highestPriceLine = [];
+
+        foreach ($physicalItems as $key => $item) {
+            $product = $products->get(Arr::get($item, 'post_id'));
+            $classId = isset($product->detail->other_info['shipping_class']) ? $product->detail->other_info['shipping_class'] : null;
+            if ($classId && (!isset($highestPriceLine[$classId]) || Arr::get($item, 'unit_price', 0) > Arr::get($physicalItems[$highestPriceLine[$classId]], 'unit_price', 0))) {
+                $highestPriceLine[$classId] = $key;
+            }
+        }
+
+        foreach ($physicalItems as $key => $item) {
+            $lineCharges[$key] = 0;
+            $product = $products->get(Arr::get($item, 'post_id'));
+            $classId = isset($product->detail->other_info['shipping_class']) ? $product->detail->other_info['shipping_class'] : null;
+            /** @var ShippingClass|null $shippingClass */
+            $shippingClass = $classId ? $shippingClasses->get($classId) : null;
+            if (!$shippingClass) {
+                continue;
+            }
+
+            $quantity = Arr::get($item, 'quantity', 1);
+            if ($shippingClass->type === 'percentage') {
+                $factor = empty($shippingClass->per_item) ? 1 : $quantity;
+                if (empty($shippingClass->per_item) && $highestPriceLine[$classId] !== $key) {
+                    /**
+                     * How a percentage class without "Apply to quantity" charges: 'highest' (once, on the
+                     * class's highest unit price) or 'per_line' (on each line's unit price).
+                     *
+                     * @param string $basis
+                     * @param array  $data ['shipping_class' => ShippingClass]
+                     */
+                    $factor = apply_filters('fluent_cart/shipping/percentage_class_basis', 'highest', ['shipping_class' => $shippingClass]) === 'per_line' ? 1 : 0;
+                }
+                $charge = Money::roundIfZeroDecimal(($shippingClass->cost / 100) * Arr::get($item, 'unit_price', 0) * $factor, (string) CurrencySettings::get('currency'));
+            } elseif (empty($shippingClass->per_item)) {
+                $charge = isset($classTotals[$classId]) ? 0 : StorefrontPrice::fee(Helper::toCent($shippingClass->cost));
+            } else {
+                $charge = StorefrontPrice::fee(Helper::toCent($shippingClass->cost)) * $quantity;
+            }
+
+            $lineCharges[$key] = $charge;
+            $classTotals[$classId] = Arr::get($classTotals, $classId, 0) + $charge;
+            $classLines[$classId][] = $key;
+        }
+
+        if ($classAggregation === 'highest_class' && $classTotals) {
+            $highestClassId = array_search(max($classTotals), $classTotals);
+            foreach ($classLines as $classId => $keys) {
+                if ($classId !== $highestClassId) {
+                    foreach ($keys as $key) {
+                        $lineCharges[$key] = 0;
+                    }
+                }
+            }
+        }
+
+        return $lineCharges;
+    }
+
+    public static function calculateShippingMethodCharge(ShippingMethod $method, ?array $items = null, $returnType = 'amount')
+    {
+        // Per-call locals: $physicalItems/$isAllDigital are rebuilt fresh from $items on every
+        // call (via CheckoutService below), and $totalItemPrice/$totalQuantity/
+        // $totalShippingCharge are accumulated fresh in the per-item
+        // annotation loop below, so none of them may persist across calls — only the
+        // $products/$shippingClasses DB lookups above are worth caching per request.
+        $totalItemPrice = 0;
+        $totalQuantity = 0;
+        $physicalItems = [];
+        $isAllDigital = false;
+        $totalShippingCharge = 0;
+        $isUsingCart = false;
+
+        if ($items === null) {
+            $isUsingCart = true;
+            $items = static::getCart()->cart_data ?? [];
+        }
+
+        // Fingerprint the resolved method + items so a same-request call with changed
+        // cart items (e.g. an item added/removed after ShippingModule::handleItemsChanges
+        // re-runs this calc) is never mistaken for a repeat of the previous call. Must be
+        // computed from the RESOLVED $items (post null → cart fallback above), not the raw
+        // argument, otherwise a null-argument call would fingerprint differently from the
+        // cart data it resolves to. Fields: id/object_id/variation_id, quantity, line_total,
+        // free_shipping, post_id, unit_price, discount_total.
+        $fingerprint = md5(serialize([
+            $method->id,
+            array_map(function ($item) {
+                return [
+                    Arr::get($item, 'id', Arr::get($item, 'object_id', Arr::get($item, 'variation_id'))),
+                    Arr::get($item, 'quantity'),
+                    Arr::get($item, 'line_total'),
+                    self::itemHasFreeShipping($item) ? 'yes' : 'no',
+                    Arr::get($item, 'post_id'),
+                    Arr::get($item, 'unit_price'),
+                    Arr::get($item, 'discount_total'),
+                ];
+            }, $items),
+        ]));
+
+        // Reset the cached-lookup guard when the method/items fingerprint changes to prevent
+        // stale $products/$shippingClasses from a previous call in the same request (replaces
+        // the old $lastMethodId check, which missed same-method-id calls made with different
+        // items). The per-call locals above are already reinitialized on every call, so only
+        // the "once" guard needs resetting here.
+        if (static::$chargeLookupFingerprint !== $fingerprint) {
+            static::$chargeProducts = null;
+            static::$chargeLookupFingerprint = $fingerprint;
+        }
+
+        if ($method->type === 'free_shipping') {
+            if ($returnType === 'items') {
+                if ($items === null) {
+                    $items = static::getCart()->cart_data ?? [];
+                }
+                foreach ($items as $key => $item) {
+                    $items[$key]['shipping_charge'] = 0;
+                    $items[$key]['itemwise_shipping_charge'] = 0;
+                }
+                return [
+                    'items'           => $items,
+                    'shipping_amount' => 0
+                ];
+            }
+            return 0;
+        }
+
+        $cartCheckoutService = new CheckoutService($items);
+        $isAllDigital = $cartCheckoutService->isAllDigital();
+        $physicalItems = $cartCheckoutService->physicalItems;
+
+        // Exclude only physical items marked for free shipping from charge calculation.
+        self::excludeFreeShippingPhysicalItems($items, $physicalItems);
+
+        // No shipping is charged for all-digital carts or when every physical item has free shipping.
+        if ($isAllDigital || empty($physicalItems)) {
+            if ($returnType === 'items') {
+                foreach ($items as $key => $item) {
+                    $items[$key]['shipping_charge'] = 0;
+                    $items[$key]['itemwise_shipping_charge'] = 0;
+                }
+                return [
+                    'items'           => $items,
+                    'shipping_amount' => 0
+                ];
+            }
+            return 0;
+        }
+
+        if (static::$chargeProducts === null) {
+            $productIds = array_unique(array_column($physicalItems, 'post_id'));
+            static::$chargeProducts = Product::query()->whereIn('ID', $productIds)
+                ->with(['detail'])
+                ->get()
+                ->keyBy('ID');
+
+            $shippingClassIds = static::$chargeProducts->pluck('detail.other_info.shipping_class')->filter(function ($item) {
+                return !empty($item);
+            })->toArray();
+
+            static::$chargeShippingClasses = ShippingClass::query()->whereIn('id', $shippingClassIds)->get()->keyBy('id');
+        }
+        $products = static::$chargeProducts;
+        $shippingClasses = static::$chargeShippingClasses;
+
+        $settings = Arr::wrap($method->settings);
+        $configureRate = Arr::get($settings, 'configure_rate', 'per_order');
+        $classAggregation = Arr::get($settings, 'class_aggregation', 'sum_all');
+
+        // Per-item annotation must run on every call, not gated behind the lookup cache:
+        // $physicalItems is always re-derived fresh from the current $items argument above, so
+        // a cache-hit call still needs its own $items populated with shipping_charge and its
+        // own totals accumulated. Only the $products/$shippingClasses DB lookups above are
+        // safe to reuse across calls in the same request.
+        $lineClassCharges = self::lineClassCharges($physicalItems, $products, $shippingClasses, $classAggregation);
+        foreach ($physicalItems as $key => &$item) {
+            $totalQuantity += Arr::get($item, 'quantity');
+            $totalItemPrice += (Arr::get($item, 'quantity') * Arr::get($item, 'unit_price')) - Arr::get($item, 'discount_total');
+            $item['shipping_charge'] = $lineClassCharges[$key];
+            $items[$key] = $item;
+        }
+        unset($item);
+        $totalShippingCharge = array_sum($lineClassCharges);
+
+        // Flat amounts are authored in the base currency; percentage rates
+        // already work on converted item prices
+        // (dev-docs/multi-currency/05-storefront-cart-checkout.md, "The cart")
+        if ($configureRate === 'per_order') {
+            $shippingMethodAmount = StorefrontPrice::fee($method->amount * 100);
+        } else if ($configureRate === 'per_price') {
+            $shippingMethodAmount = Money::roundIfZeroDecimal($totalItemPrice * ($method->amount / 100), (string) CurrencySettings::get('currency'));
+        } else if ($configureRate === 'per_weight') {
+            $tier = self::findWeightTier(Arr::get($settings, 'weight_tiers', []), self::physicalItemsWeight($physicalItems));
+            // No tier: shippingMethodCoversItems() keeps the method out of the rate list.
+            $shippingMethodAmount = $tier ? StorefrontPrice::fee(Helper::toCent(floatval(Arr::get($tier, 'cost', 0)))) : 0;
+        } else {
+            $shippingMethodAmount = StorefrontPrice::fee($method->amount * 100) * $totalQuantity;
+        }
+
+        $shippingMethodAmount += $totalShippingCharge;
+
+        $shippingMethodAmount = (int)round($shippingMethodAmount);
+
+        $remainingShippingMethodAmount = ($shippingMethodAmount - $totalShippingCharge);
+
+        // Distribution must run on every call (not gated behind a "once" flag): $physicalItems
+        // above is always re-derived fresh from the current $items argument regardless of the
+        // lookup cache, so a cached call still needs its own $items populated with
+        // itemwise_shipping_charge — a stale "already distributed" flag would leave a freshly
+        // passed-in items array with missing/zero shares even though the fingerprint matched.
+        $totalLineTotal = array_sum(array_column($physicalItems, 'line_total'));
+        $distributed = 0;
+        $itemCount = count($physicalItems);
+        $lastIndex = array_key_last($physicalItems);
+        $unit = Money::getDecimals((string) CurrencySettings::get('currency')) === 0 ? 100 : 1;
+
+        foreach ($physicalItems as $key => $item) {
+            if ($key === $lastIndex) {
+                // Last item takes the exact remainder — per-item rounding must never
+                // change the total the customer is charged for shipping.
+                $share = (int) round($remainingShippingMethodAmount - $distributed);
+            } elseif ($totalLineTotal > 0) {
+                $share = (int) round(($item['line_total'] / $totalLineTotal) * $remainingShippingMethodAmount);
+            } else {
+                $share = (int) round($remainingShippingMethodAmount / $itemCount);
+            }
+            if ($unit > 1) {
+                $share = min(max(0, $remainingShippingMethodAmount - $distributed), (int) floor($share / $unit) * $unit);
+            }
+            $items[$key]['itemwise_shipping_charge'] = $share;
+            $distributed += $share;
+        }
+
+        if ($isUsingCart) {
+            $cart = CartHelper::getCart();
+            $cart->cart_data = $items;
+            $cart->save();
+
+            do_action('fluent_cart/checkout/shipping_data_changed', [
+                'cart' => $cart
+            ]);
+        }
+
+        if ($returnType === 'items') {
+            return [
+                'items'           => $items,
+                'shipping_amount' => $shippingMethodAmount
+            ];
+        }
+
+        return $shippingMethodAmount;
+    }
+
+    /**
+     * Calculate shipping charges using the profile-based approach.
+     * Groups cart items by shipping class, finds applicable methods per profile,
+     * falls back to General zones when no class-specific zones exist.
+     *
+     * @param int $shippingMethodId The selected shipping method ID
+     * @param array $cartItems Cart items
+     * @param string $country Country code
+     * @param string|null $state State code
+     * @param string $returnType 'amount' or 'items'
+     * @return int|array
+     */
+    public static function calculateShippingByProfile($shippingMethodId, $cartItems, $country, $state = null, $returnType = 'amount')
+    {
+        $cartCheckoutService = new CheckoutService($cartItems);
+        $isAllDigital = $cartCheckoutService->isAllDigital();
+        $physicalItems = $cartCheckoutService->physicalItems;
+
+        // Exclude only physical items marked for free shipping from profile-based charges.
+        self::excludeFreeShippingPhysicalItems($cartItems, $physicalItems);
+
+        // No shipping is charged for all-digital carts or when every physical item has free shipping.
+        if ($isAllDigital || empty($physicalItems)) {
+            if ($returnType === 'items') {
+                foreach ($cartItems as $key => $item) {
+                    $cartItems[$key]['shipping_charge'] = 0;
+                    $cartItems[$key]['itemwise_shipping_charge'] = 0;
+                }
+                return ['items' => $cartItems, 'shipping_amount' => 0];
+            }
+            return 0;
+        }
+
+        // Load products with details
+        $productIds = array_unique(array_column($physicalItems, 'post_id'));
+        $products = Product::query()->whereIn('ID', $productIds)
+            ->with(['detail'])
+            ->get()
+            ->keyBy('ID');
+
+        // Group physical items by shipping_class_id (null = General group)
+        $groups = [];
+        foreach ($physicalItems as $key => $item) {
+            $product = $products->get(Arr::get($item, 'post_id'));
+            $classId = null;
+            if ($product && isset($product->detail->other_info['shipping_class'])) {
+                $classId = $product->detail->other_info['shipping_class'] ?: null;
+            }
+            $groupKey = $classId ?: 'general';
+            if (!isset($groups[$groupKey])) {
+                $groups[$groupKey] = [
+                    'class_id' => $classId,
+                    'items'    => [],
+                    'keys'     => []
+                ];
+            }
+            $groups[$groupKey]['items'][] = $item;
+            $groups[$groupKey]['keys'][] = $key;
+        }
+
+        // Load shipping classes for surcharge calculation
+        $classIds = array_filter(array_column($groups, 'class_id'));
+        $shippingClasses = !empty($classIds)
+            ? ShippingClass::query()->whereIn('id', $classIds)->get()->keyBy('id')
+            : new \FluentCart\Framework\Support\Collection();
+
+        $selectedMethod = ShippingMethod::find($shippingMethodId);
+        if (!$selectedMethod) {
+            if ($returnType === 'items') {
+                return ['items' => $cartItems, 'shipping_amount' => 0];
+            }
+            return 0;
+        }
+
+        // Early return for free_shipping — no base rate, no class surcharges
+        if ($selectedMethod->type === 'free_shipping') {
+            if ($returnType === 'items') {
+                foreach ($cartItems as $key => $item) {
+                    $cartItems[$key]['shipping_charge'] = 0;
+                    $cartItems[$key]['itemwise_shipping_charge'] = 0;
+                }
+                return ['items' => $cartItems, 'shipping_amount' => 0];
+            }
+            return 0;
+        }
+
+        $totalShippingAmount = 0;
+
+        // Compute cart-wide totals BEFORE the group loop (for per_order/per_price/per_weight base rate)
+        $cartTotalPrice = 0;
+        $cartTotalQuantity = 0;
+        foreach ($physicalItems as $item) {
+            $quantity = Arr::get($item, 'quantity', 1);
+            $cartTotalQuantity += $quantity;
+            $cartTotalPrice += ($quantity * Arr::get($item, 'unit_price', 0)) - Arr::get($item, 'discount_total', 0);
+        }
+
+        // Calculate the method base rate ONCE using cart-wide totals
+        $settings = Arr::wrap($selectedMethod->settings);
+        $configureRate = Arr::get($settings, 'configure_rate', 'per_order');
+        $classAggregation = Arr::get($settings, 'class_aggregation', 'sum_all');
+
+        // Flat amounts are authored in the base currency; percentage rates
+        // already work on converted item prices
+        // (dev-docs/multi-currency/05-storefront-cart-checkout.md, "The cart")
+        if ($configureRate === 'per_order') {
+            $methodBaseRate = StorefrontPrice::fee(Helper::toCent($selectedMethod->amount));
+        } elseif ($configureRate === 'per_price') {
+            $methodBaseRate = Money::roundIfZeroDecimal($cartTotalPrice * ($selectedMethod->amount / 100), (string) CurrencySettings::get('currency'));
+        } elseif ($configureRate === 'per_weight') {
+            $tier = self::findWeightTier(Arr::get($settings, 'weight_tiers', []), self::physicalItemsWeight($physicalItems));
+            $methodBaseRate = $tier ? StorefrontPrice::fee(Helper::toCent(floatval(Arr::get($tier, 'cost', 0)))) : 0;
+        } else {
+            // per_item
+            $methodBaseRate = StorefrontPrice::fee(Helper::toCent($selectedMethod->amount)) * $cartTotalQuantity;
+        }
+
+        $lineClassCharges = self::lineClassCharges($physicalItems, $products, $shippingClasses, $classAggregation);
+        foreach ($groups as &$group) {
+            foreach ($group['keys'] as $i => $key) {
+                $group['items'][$i]['shipping_charge'] = $lineClassCharges[$key];
+            }
+        }
+        unset($group);
+
+        $totalShippingAmount = $methodBaseRate + array_sum($lineClassCharges);
+
+        // Distribute the total shipping amount across all physical items proportionally
+        $totalLineTotal = 0;
+        foreach ($physicalItems as $item) {
+            $totalLineTotal += Arr::get($item, 'line_total', 0);
+        }
+
+        $methodOnlyAmount = $methodBaseRate;
+        $unit = Money::getDecimals((string) CurrencySettings::get('currency')) === 0 ? 100 : 1;
+        $distributed = 0;
+        $itemCount = count($physicalItems);
+
+        // The last physical item overall (last item of the last group, in traversal order)
+        // absorbs the exact remainder — per-item rounding must never change the total
+        // the customer is charged for shipping.
+        $lastGroupKey = array_key_last($groups);
+        $lastItemIdx = ($lastGroupKey !== null && !empty($groups[$lastGroupKey]['items']))
+            ? array_key_last($groups[$lastGroupKey]['items'])
+            : null;
+
+        foreach ($groups as $groupKey => &$group) {
+            $groupItems = $group['items'];
+            foreach ($groupItems as $idx => &$gItem) {
+                if ($groupKey === $lastGroupKey && $idx === $lastItemIdx) {
+                    $share = (int) round($methodOnlyAmount - $distributed);
+                } elseif ($totalLineTotal > 0) {
+                    $share = (int) round((Arr::get($gItem, 'line_total', 0) / $totalLineTotal) * $methodOnlyAmount);
+                } else {
+                    $share = $itemCount > 0 ? (int) round($methodOnlyAmount / $itemCount) : 0;
+                }
+                // itemwise_shipping_charge carries only the proportional base-rate share.
+                // The class surcharge stays exclusively in shipping_charge (set above) so it
+                // isn't taxed twice by TaxCalculator::getShippingTax(), which sums both fields.
+                if ($unit > 1) {
+                    $share = min(max(0, $methodOnlyAmount - $distributed), (int) floor($share / $unit) * $unit);
+                }
+                $gItem['itemwise_shipping_charge'] = $share;
+                $distributed += $share;
+            }
+            unset($gItem);
+            $group['items'] = $groupItems;
+        }
+        unset($group);
+
+        // Merge group items back into cartItems
+        foreach ($groups as $group) {
+            foreach ($group['keys'] as $i => $key) {
+                if (isset($group['items'][$i])) {
+                    $cartItems[$key]['shipping_charge'] = Arr::get($group['items'][$i], 'shipping_charge', 0);
+                    $cartItems[$key]['itemwise_shipping_charge'] = Arr::get($group['items'][$i], 'itemwise_shipping_charge', 0);
+                }
+            }
+        }
+
+        if ($returnType === 'items') {
+            return [
+                'items'           => $cartItems,
+                'shipping_amount' => $totalShippingAmount
+            ];
+        }
+
+        return $totalShippingAmount;
+    }
+
+    /**
+     * Spread a flat carrier quote over the physical lines by line total, the way a
+     * zone rate is spread, so shipping tax sees it. The last line takes the
+     * remainder so the shares always sum to the quote.
+     *
+     * @param array $items  Cart line items.
+     * @param int   $amount Shipping charge in cents, checkout currency.
+     * @return array{items: array, shipping_amount: int}
+     */
+    public static function itemizeFlatShipping($items, $amount): array
+    {
+        $items = is_array($items) ? $items : [];
+        $amount = max(0, Helper::roundCent($amount));
+
+        foreach ($items as $key => $item) {
+            $items[$key]['shipping_charge'] = 0;
+            $items[$key]['itemwise_shipping_charge'] = 0;
+        }
+
+        $physicalItems = (new CheckoutService($items))->physicalItems;
+        if (!$physicalItems) {
+            return ['items' => $items, 'shipping_amount' => $amount];
+        }
+
+        $totalLineTotal = array_sum(array_column($physicalItems, 'line_total'));
+        $lastIndex = array_key_last($physicalItems);
+        $unit = Money::getDecimals((string) CurrencySettings::get('currency')) === 0 ? 100 : 1;
+        $distributed = 0;
+
+        foreach ($physicalItems as $key => $item) {
+            if ($key === $lastIndex) {
+                $share = $amount - $distributed;
+            } elseif ($totalLineTotal > 0) {
+                $share = (int) round((Arr::get($item, 'line_total', 0) / $totalLineTotal) * $amount);
+            } else {
+                $share = (int) round($amount / count($physicalItems));
+            }
+            if ($unit > 1) {
+                $share = min(max(0, $amount - $distributed), (int) floor($share / $unit) * $unit);
+            }
+            $share = min(max(0, $share), $amount - $distributed);
+            $items[$key]['itemwise_shipping_charge'] = $share;
+            $distributed += $share;
+        }
+
+        return ['items' => $items, 'shipping_amount' => $amount];
+    }
+
+    /**
+     * Itemize the selected rate: a zone method is recalculated against the items,
+     * any other carrier's rate is a flat quote spread by itemizeFlatShipping().
+     *
+     * @param array $rate  Rate array (see CarrierContract::getRates).
+     * @param array $items Cart line items.
+     * @return array{items: array, shipping_amount: int}
+     */
+    public static function itemizeSelectedRate(array $rate, $items): array
+    {
+        $id = Arr::get($rate, 'id');
+        $isZoneMethod = Arr::get($rate, 'carrier', 'manual') === 'manual' && is_numeric($id);
+        $model = $isZoneMethod ? ShippingMethod::query()->find($id) : null;
+
+        if (!$model) {
+            return static::itemizeFlatShipping($items, Arr::get($rate, 'cost', 0));
+        }
+
+        return static::calculateShippingMethodCharge($model, is_array($items) ? $items : [], 'items');
+    }
+
+    public static function resetShippingCharge()
+    {
+        $cart = CartHelper::getCart();
+        $items = $cart->cart_data;
+        foreach ($items as $key => $item) {
+            $items[$key]['shipping_charge'] = 0;
+            $items[$key]['itemwise_shipping_charge'] = 0;
+        }
+        $cart->cart_data = $items;
+
+        $cart->checkout_data = array_merge($cart->checkout_data, [
+            'shipping_data' => [
+                'shipping_method_id' => null,
+                'shipping_charge'    => 0
+            ]
+        ]);
+
+        $cart->save();
+
+        do_action('fluent_cart/checkout/shipping_data_changed', [
+            'cart' => $cart
+        ]);
+    }
+
+    public static function generateCartFromVariation(ProductVariation $variation, $quantity = 1): Cart
+    {
+        $cart = new Cart();
+        $cart->cart_data = [
+            static::generateCartItemFromVariation($variation, $quantity)
+        ];
+
+        $cart = static::addCommonCartData($cart);
+        return $cart;
+    }
+
+    public static function addCommonCartData(Cart $cart)
+    {
+        if (is_user_logged_in()) {
+            $wpUser = wp_get_current_user();
+            $cart->user_id = get_current_user_id();
+            // The cart belongs to the account's linked customer, not to whichever record holds its email.
+            $customer = Customer::query()->where('user_id', $wpUser->ID)->orderBy('id', 'ASC')->first();
+            if ($customer) {
+                $cart->customer_id = $customer->id;
+            }
+            $cart->email = $wpUser->user_email;
+            $cart->first_name = $wpUser->first_name;
+            $cart->last_name = $wpUser->last_name;
+            $cart->ip_address = AddressHelper::getIpAddress();
+            $cart->user_agent = AddressHelper::getUserAgent();
+        }
+
+        return $cart;
+    }
+
+    public static function generateCartFromCustomVariation(array $variation, $quantity = 1): Cart
+    {
+        $cart = new Cart();
+        $cart->cart_data = [
+            static::generateCartItemCustomItem($variation, $quantity)
+        ];
+        return $cart;
+    }
+
+    /**
+     * Normalize custom item fields to standard cart variation format.
+     *
+     * NOTE:
+     * - Custom items may originate from external sources (filters, adjustments, migrations)
+     * - Some sources provide `id`, others only provide `item_id`
+     * - For cart consistency, `id` is required and will fall back to `item_id` when missing
+     * - This method intentionally mutates the provided object to normalize field names.
+     *   The variation object is treated as a transient data structure and is not reused
+     *   elsewhere after normalization.
+     *
+     * @param object $variation
+     * @return object
+     */
+    public static function normalizeCustomFields(object $variation): object
+    {
+        // Map custom fields to native fields only if they exist
+        $variation->id              = $variation->id ?? $variation->item_id;
+        $variation->item_price      = $variation->item_price
+            ?? $variation->unit_price
+            ?? $variation->price
+            ?? 0;
+        $variation->variation_title = $variation->title ?? ($variation->variation_title ?? '');
+
+
+        // Fallbacks
+        $variation->post_id     = $variation->post_id ?? 0;
+        $variation->object_id   = $variation->object_id ?? $variation->id;
+        $variation->unit_price  = $variation->unit_price
+            ?? $variation->item_price
+            ?? $variation->price
+            ?? 0;
+
+        // Payment & fulfillment
+        $variation->payment_type     = sanitize_text_field($variation->payment_type ?? 'onetime');
+        $variation->fulfillment_type = sanitize_text_field($variation->fulfillment_type ?? 'digital');
+
+        // Other info
+        if (!empty($variation->other_info) && is_array($variation->other_info)) {
+            $variation->other_info = $variation->other_info;
+        } else {
+            $variation->other_info = [];
+        }
+
+        // Add custom flags
+        $variation->other_info['is_custom'] = $variation->is_custom ?? false;
+        $variation->other_info['view_url']  = $variation->view_url  ?? '';
+
+        return $variation;
+    }
+
+
+    /**
+     * @param ProductVariation $variation
+     * @param int|string $updatedQuantity
+     * @return bool
+     */
+    public static function shouldAddItemToCart(ProductVariation $variation, $updatedQuantity): bool
+    {
+        if ($variation->manage_stock == 0) {
+            return true;
+        }
+        return $updatedQuantity <= $variation->available;
+    }
+
+    public static function doingInstantCheckout()
+    {
+        $variationId = App::request()->get(Helper::INSTANT_CHECKOUT_URL_PARAM);
+        if (empty($variationId)) {
+            return false;
+        }
+        return $variationId;
+    }
+
+    /**
+     * @param \FluentCart\App\Models\Cart $cart
+     * @param array|\WP_Error             $methods
+     * @param string|int|null             $currentSelectedId
+     * @return string|int|null
+     */
+    public static function resolveAutoSelectShippingMethod($cart, $methods, $currentSelectedId)
+    {
+        // A pick this list does not offer would stay charged with no option checked. Keep it
+        // while a carrier source of this list (rateSourceState) is pending: it may still arrive.
+        if ($currentSelectedId && $methods && is_array($methods) && !AddressHelper::findRate($methods, $currentSelectedId)
+            && !AddressHelper::rateSourceState()['pending']) {
+            $cart->checkout_data = array_merge((array) $cart->checkout_data, [
+                'shipping_data' => ['shipping_method_id' => null, 'shipping_charge' => 0],
+            ]);
+            $cart->save();
+            do_action('fluent_cart/checkout/shipping_data_changed', ['cart' => $cart]);
+            $currentSelectedId = null;
+        }
+
+        if ($currentSelectedId || empty($methods) || is_wp_error($methods) || count($methods) !== 1) {
+            return $currentSelectedId;
+        }
+
+        $rate = Arr::first($methods);
+        $rateId = Arr::get($rate, 'id');
+
+        // 'method' stays an object for existing listeners: the ShippingMethod model
+        // for a zone rate, the rate as an object otherwise. 'rate' is the rate array.
+        $isZoneMethod = Arr::get($rate, 'carrier', 'manual') === 'manual' && is_numeric($rateId);
+        $method = $isZoneMethod ? ShippingMethod::query()->find($rateId) : null;
+
+        $shouldAutoSelect = apply_filters('fluent_cart/shipping/auto_select_single_method', true, [
+            'cart'   => $cart,
+            'method' => $method ?: (object) $rate,
+            'rate'   => $rate,
+        ]);
+
+        if (!$shouldAutoSelect) {
+            return $currentSelectedId;
+        }
+
+        $cart->checkout_data = array_merge(
+            (array) $cart->checkout_data,
+            [
+                'shipping_data' => [
+                    'shipping_method_id' => $rateId,
+                    'shipping_charge'    => Helper::roundCent(Arr::get($rate, 'cost', 0)),
+                ],
+            ]
+        );
+        $cart->save();
+
+        return $rateId;
+    }
+}

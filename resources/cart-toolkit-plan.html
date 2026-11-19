@@ -1,0 +1,775 @@
+<title>Cart Toolkit Plan</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700&family=Source+Sans+3:wght@400;600;700&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: one 960px column; each section is a numbered plan step, visuals first, short notes under them. */
+:root {
+  --bg: #f6f8f7;
+  --surface: #ffffff;
+  --ink: #15201d;
+  --muted: #56645f;
+  --line: #d8e0dd;
+  --accent: #0d6b58;
+  --accent-soft: #e2f1ec;
+  --warn: #9a5b00;
+  --warn-soft: #fbf0dc;
+  --bad: #a3322b;
+  --bad-soft: #f8e3e1;
+  --good: #1f7a3d;
+  --good-soft: #e3f3e7;
+  --code-bg: #eef3f1;
+  --display: "Bricolage Grotesque", "Avenir Next", "Segoe UI", sans-serif;
+  --body: "Source Sans 3", "Segoe UI", Helvetica, Arial, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0f1514; --surface: #172120; --ink: #e4ece9; --muted: #9aaba5; --line: #2b3a37;
+    --accent: #4fc2a6; --accent-soft: #163a32; --warn: #e8b45c; --warn-soft: #3a2c12;
+    --bad: #f0857c; --bad-soft: #3d1d1a; --good: #6fd08f; --good-soft: #17331f; --code-bg: #1d2a28;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0f1514; --surface: #172120; --ink: #e4ece9; --muted: #9aaba5; --line: #2b3a37;
+  --accent: #4fc2a6; --accent-soft: #163a32; --warn: #e8b45c; --warn-soft: #3a2c12;
+  --bad: #f0857c; --bad-soft: #3d1d1a; --good: #6fd08f; --good-soft: #17331f; --code-bg: #1d2a28;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--ink); font-family: var(--body); font-size: 16.5px; line-height: 1.65; -webkit-tap-highlight-color: transparent; }
+.wrap { max-width: 960px; margin: 0 auto; padding-block: 40px 80px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); display: flex; flex-direction: column; gap: 56px; }
+h1, h2, h3 { font-family: var(--display); line-height: 1.15; text-wrap: balance; margin: 0; }
+h1 { font-size: 2.4rem; }
+h2 { font-size: 1.6rem; }
+h3 { font-size: 1.1rem; }
+p { margin: 0; }
+code, .mono { font-family: var(--mono); font-size: 0.82em; }
+code { background: var(--code-bg); padding: 1px 5px; border-radius: 4px; word-break: break-word; }
+a { color: var(--accent); }
+section { display: flex; flex-direction: column; gap: 18px; }
+.eyebrow { font-size: 0.78rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--accent); font-weight: 700; }
+.lede { color: var(--muted); font-size: 1.08rem; }
+.meta { display: flex; flex-wrap: wrap; gap: 8px; }
+.chip { display: inline-flex; align-items: center; gap: 6px; font-size: 0.8rem; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--line); background: var(--surface); color: var(--muted); white-space: nowrap; }
+.chip.good { background: var(--good-soft); color: var(--good); border-color: transparent; }
+.chip.warn { background: var(--warn-soft); color: var(--warn); border-color: transparent; }
+.chip.bad { background: var(--bad-soft); color: var(--bad); border-color: transparent; }
+.chip.acc { background: var(--accent-soft); color: var(--accent); border-color: transparent; }
+.chip svg { width: 13px; height: 13px; }
+.head { display: flex; flex-direction: column; gap: 14px; }
+.toc { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 0.92rem; }
+
+/* Flow */
+.flow { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; counter-reset: step; }
+.step { position: relative; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 14px 14px 16px; display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.step::before { counter-increment: step; content: counter(step); font-family: var(--mono); font-size: 0.75rem; color: var(--accent); font-weight: 500; }
+.step b { font-size: 0.98rem; line-height: 1.3; }
+.step span { font-size: 0.86rem; color: var(--muted); line-height: 1.45; }
+.step.ours { border-color: var(--accent); background: var(--accent-soft); }
+.step.ours::after { content: "Cart Toolkit"; position: absolute; top: 12px; right: 12px; font-size: 0.68rem; letter-spacing: 0.05em; text-transform: uppercase; color: var(--accent); font-weight: 700; }
+.legend { display: flex; flex-wrap: wrap; gap: 16px; font-size: 0.85rem; color: var(--muted); }
+.legend i { display: inline-block; width: 12px; height: 12px; border-radius: 3px; vertical-align: -1px; margin-right: 6px; border: 1px solid var(--line); background: var(--surface); }
+.legend i.ours { background: var(--accent-soft); border-color: var(--accent); }
+
+/* Tables */
+.tbl { overflow-x: auto; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
+table { border-collapse: collapse; width: 100%; font-size: 0.92rem; }
+th, td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font-size: 0.76rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); font-weight: 700; background: var(--bg); }
+tr:last-child td { border-bottom: none; }
+td.c { text-align: center; }
+.yes, .no, .lock { display: inline-flex; align-items: center; gap: 4px; font-weight: 600; font-size: 0.86rem; white-space: nowrap; }
+.yes { color: var(--good); } .no { color: var(--bad); } .lock { color: var(--warn); }
+.yes svg, .no svg, .lock svg { width: 15px; height: 15px; }
+
+/* Before / after */
+.pair { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px; }
+.panel { border-radius: 10px; padding: 16px 18px; border: 1px solid var(--line); background: var(--surface); display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.panel h3 { display: flex; align-items: center; gap: 8px; }
+.panel ul { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 4px; font-size: 0.95rem; }
+.panel.before { border-top: 3px solid var(--bad); }
+.panel.after { border-top: 3px solid var(--good); }
+
+/* Mockups */
+.mock-label { font-size: 0.78rem; color: var(--muted); display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.browser { border: 1px solid var(--line); border-radius: 12px; overflow: hidden; background: var(--surface); }
+.bar { display: flex; gap: 6px; align-items: center; padding: 8px 12px; background: var(--bg); border-bottom: 1px solid var(--line); font-family: var(--mono); font-size: 0.74rem; color: var(--muted); overflow-x: auto; white-space: nowrap; }
+.bar .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--line); flex: none; }
+.bar .url { margin-left: 8px; }
+.page { padding: 22px; display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: 22px; }
+.page h4 { margin: 0 0 4px; font-family: var(--display); font-size: 1.2rem; }
+.col { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.opts { display: grid; gap: 8px; }
+.opt { display: flex; gap: 10px; align-items: center; border: 1.5px solid var(--line); border-radius: 9px; padding: 10px 12px; }
+.opt .r { width: 16px; height: 16px; border-radius: 50%; border: 2px solid var(--muted); flex: none; }
+.opt.on { border-color: var(--accent); background: var(--accent-soft); }
+.opt.on .r { border-color: var(--accent); box-shadow: inset 0 0 0 3px var(--surface); background: var(--accent); }
+.opt .t { flex: 1; min-width: 0; font-weight: 600; font-size: 0.95rem; }
+.opt .p { font-family: var(--mono); font-size: 0.82rem; color: var(--muted); white-space: nowrap; }
+.fld { display: flex; flex-direction: column; gap: 4px; font-size: 0.85rem; }
+.fld .in { height: 36px; border: 1px solid var(--line); border-radius: 7px; background: var(--bg); }
+.fld .in.tall { height: 64px; }
+.fld.ours { position: relative; padding: 10px; border: 1.5px dashed var(--accent); border-radius: 9px; gap: 10px; }
+.fld.ours > em { font-style: normal; font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--accent); font-weight: 700; }
+.fld label { font-weight: 600; }
+.pay { height: 70px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 0.82rem; }
+.btn { height: 42px; border-radius: 8px; background: var(--accent); color: var(--surface); font-weight: 700; display: flex; align-items: center; justify-content: center; font-size: 0.95rem; }
+.sumrow { display: flex; justify-content: space-between; font-size: 0.88rem; border-bottom: 1px solid var(--line); padding-bottom: 6px; gap: 8px; }
+.sumrow.tot { font-weight: 700; border-bottom: none; }
+.fc-tag { font-size: 0.7rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
+
+/* Admin mock */
+.admin { display: grid; grid-template-columns: 170px minmax(0, 1fr); min-height: 0; }
+.admin nav { background: var(--bg); border-right: 1px solid var(--line); padding: 14px 10px; display: flex; flex-direction: column; gap: 2px; font-size: 0.86rem; }
+.admin nav span { padding: 6px 10px; border-radius: 6px; color: var(--muted); }
+.admin nav span.on { background: var(--accent-soft); color: var(--accent); font-weight: 700; }
+.admin .main { padding: 18px 20px; display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; }
+.sel { height: 36px; border: 1px solid var(--line); border-radius: 7px; background: var(--bg); display: flex; align-items: center; padding: 0 10px; font-size: 0.88rem; }
+.checks { display: flex; flex-direction: column; gap: 6px; font-size: 0.9rem; }
+.cb { display: flex; align-items: center; gap: 8px; }
+.cb i { width: 15px; height: 15px; border-radius: 4px; border: 2px solid var(--muted); flex: none; }
+.cb i.x { background: var(--accent); border-color: var(--accent); }
+.cb small { color: var(--muted); }
+.fields-tbl td, .fields-tbl th { padding: 7px 10px; font-size: 0.84rem; }
+.card { border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; background: var(--surface); display: flex; flex-direction: column; gap: 8px; }
+.kv { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr); gap: 4px 12px; font-size: 0.88rem; }
+.kv dt { color: var(--muted); }
+.kv dd { margin: 0; font-weight: 600; }
+
+/* Checks */
+.checklist { display: flex; flex-direction: column; gap: 0; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); overflow: hidden; }
+.ck { display: grid; grid-template-columns: 34px minmax(0, 1fr) minmax(0, 1fr); gap: 12px; padding: 12px 14px; border-bottom: 1px solid var(--line); align-items: start; }
+.ck:last-child { border-bottom: none; }
+.ck .n { font-family: var(--mono); color: var(--accent); font-size: 0.85rem; padding-top: 2px; }
+.ck .q { font-weight: 600; }
+.ck .a { color: var(--muted); font-size: 0.9rem; }
+
+/* Scenarios */
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; }
+.scn { border: 1px solid var(--line); border-radius: 10px; background: var(--surface); padding: 14px 16px; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.scn .if { font-weight: 700; }
+.scn .then { font-size: 0.93rem; color: var(--muted); }
+.scn .tag { align-self: flex-start; }
+
+/* Notes and risks */
+.note { border-left: 3px solid var(--accent); background: var(--surface); padding: 12px 16px; border-radius: 0 8px 8px 0; font-size: 0.95rem; }
+.risks { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; }
+.risk { border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; background: var(--surface); display: flex; flex-direction: column; gap: 6px; }
+.risk h3 { font-size: 1rem; }
+.risk p { font-size: 0.92rem; color: var(--muted); }
+.risk .fix { color: var(--ink); }
+
+/* Timeline */
+.tl { display: flex; flex-direction: column; gap: 0; border-left: 2px solid var(--line); margin-left: 10px; }
+.tl li { list-style: none; position: relative; padding: 0 0 18px 24px; }
+.tl li::before { content: ""; position: absolute; left: -7px; top: 6px; width: 12px; height: 12px; border-radius: 50%; background: var(--surface); border: 2px solid var(--accent); }
+.tl li.gate::before { background: var(--warn); border-color: var(--warn); }
+.tl ol { margin: 0; padding: 0; }
+.tl b { display: block; }
+.tl span { font-size: 0.92rem; color: var(--muted); }
+.tl .v { font-family: var(--mono); font-size: 0.8rem; color: var(--accent); margin-right: 6px; }
+
+/* Decisions */
+.decisions { display: flex; flex-direction: column; gap: 14px; }
+.dq { border: 1px solid var(--line); border-radius: 12px; background: var(--surface); padding: 18px; display: flex; flex-direction: column; gap: 12px; }
+.dq-head { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; }
+.dq-head h3 { font-size: 1.05rem; }
+.dq .why { font-size: 0.92rem; color: var(--muted); }
+.status { flex: none; width: 92px; height: 24px; display: flex; align-items: center; justify-content: flex-end; font-size: 0.78rem; color: var(--muted); }
+.status.saved { color: var(--good); }
+.status.err { color: var(--bad); }
+.choices { display: grid; gap: 8px; }
+.choice { display: grid; grid-template-columns: 20px minmax(0, 1fr); gap: 10px; align-items: start; padding: 10px 12px; border: 1.5px solid var(--line); border-radius: 9px; cursor: pointer; }
+.choice:has(input:checked) { border-color: var(--accent); background: var(--accent-soft); }
+.choice input { margin: 3px 0 0; accent-color: var(--accent); width: 16px; height: 16px; }
+.choice b { display: block; font-size: 0.96rem; }
+.choice small { color: var(--muted); font-size: 0.86rem; display: block; line-height: 1.45; }
+.rec { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--accent); font-weight: 700; margin-left: 6px; }
+textarea { width: 100%; min-height: 64px; resize: vertical; font: inherit; font-size: 0.93rem; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
+textarea:focus-visible, .choice:focus-within { outline: 2px solid var(--accent); outline-offset: 2px; }
+.offline { height: 48px; display: flex; align-items: center; padding: 0 14px; border-radius: 8px; background: var(--warn-soft); color: var(--warn); font-size: 0.9rem; }
+
+/* Lanes and building blocks */
+.part { border-top: 2px solid var(--ink); padding-top: 14px; display: flex; flex-direction: column; gap: 6px; }
+.part h2 { font-size: 1.9rem; }
+.lanes { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 12px; }
+.lane { border-radius: 12px; padding: 16px; display: flex; flex-direction: column; gap: 10px; border: 1px solid var(--line); background: var(--surface); min-width: 0; }
+.lane.ours { border-color: var(--accent); background: var(--accent-soft); }
+.lane h3 { font-size: 1rem; }
+.lane .who { font-size: 0.74rem; text-transform: uppercase; letter-spacing: 0.06em; font-weight: 700; color: var(--muted); }
+.lane.ours .who { color: var(--accent); }
+.lane ul { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 4px; font-size: 0.93rem; }
+.lane .unk { color: var(--warn); font-weight: 600; }
+.blocks { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; }
+.block { border: 1px solid var(--line); border-radius: 12px; background: var(--surface); padding: 16px 18px; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.block .bn { font-family: var(--mono); font-size: 0.75rem; color: var(--accent); }
+.block p { font-size: 0.94rem; }
+.block .uses { display: flex; flex-wrap: wrap; gap: 6px; margin-top: auto; padding-top: 4px; }
+.matrix td.c, .matrix th.c { text-align: center; }
+.lib { display: flex; flex-direction: column; gap: 14px; }
+.lib-group { display: flex; flex-direction: column; gap: 6px; }
+.lib-group > b { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+.lib-row { display: grid; grid-template-columns: 22px minmax(0, 1.3fr) minmax(0, 0.8fr) minmax(0, 1.4fr); gap: 10px; align-items: center; font-size: 0.88rem; padding: 7px 10px; border: 1px solid var(--line); border-radius: 8px; }
+.lib-row.in { border-color: var(--accent); }
+.lib-row .ty { font-family: var(--mono); font-size: 0.76rem; color: var(--muted); }
+.lib-row .ch { color: var(--muted); font-size: 0.82rem; }
+.fill { display: inline-flex; border: 1px solid var(--line); border-radius: 7px; overflow: hidden; font-size: 0.78rem; }
+.fill span { padding: 3px 8px; color: var(--muted); }
+.fill span.on { background: var(--accent); color: var(--surface); font-weight: 700; }
+.plain { border: 1px solid var(--line); border-radius: 12px; background: var(--surface); padding: 18px; display: flex; flex-direction: column; gap: 10px; }
+.plain .story { border-left: 3px solid var(--warn); padding: 4px 0 4px 14px; }
+.need { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; }
+.need .scn b { font-size: 0.98rem; }
+.group-label { font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.08em; font-weight: 700; color: var(--muted); padding-top: 8px; }
+
+@media (max-width: 720px) {
+  .lib-row { grid-template-columns: 22px minmax(0, 1fr); }
+  .lib-row .ty, .lib-row .ch, .lib-row .fill { grid-column: 2; }
+  h1 { font-size: 1.9rem; }
+  .page { grid-template-columns: 1fr; padding: 16px; }
+  .admin { grid-template-columns: 1fr; }
+  .admin nav { flex-direction: row; flex-wrap: wrap; border-right: none; border-bottom: 1px solid var(--line); }
+  .ck { grid-template-columns: 28px minmax(0, 1fr); }
+  .ck .a { grid-column: 2; }
+}
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="i-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18M6 6l12 12"/></symbol>
+  <symbol id="i-lock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></symbol>
+  <symbol id="i-shield" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></symbol>
+</svg>
+
+<div class="wrap">
+
+<header class="head">
+  <div class="eyebrow">FluentCart add-on · plan for review</div>
+  <h1>Cart Toolkit: checkout forms and free signup</h1>
+  <p class="lede">Version 2, after your answers. Part 1 is the shape of the whole thing: what Cart Toolkit is responsible for, the few building blocks it's made of, and how every form field becomes a Groundhogg field. Part 2 keeps the technical detail for the record. Nothing is built yet.</p>
+  <div class="meta">
+    <span class="chip good"><svg><use href="#i-check"/></svg>Checked against FluentCart 2.3.2</span>
+    <span class="chip good"><svg><use href="#i-check"/></svg>Groundhogg field list read from go.automationbridge.com</span>
+    <span class="chip good"><svg><use href="#i-check"/></svg>No changes to FluentCart</span>
+    <span class="chip warn">Waiting on your current automation</span>
+  </div>
+  <nav class="toc">
+    <a href="#jobs">Who does what</a><a href="#blocks">Building blocks</a><a href="#library">Field library</a><a href="#plain">Two questions in plain English</a><a href="#need">What I need from you</a><a href="#decide">Decisions</a><a href="#journey">Part 2: technical detail</a>
+  </nav>
+</header>
+
+<div class="part"><div class="eyebrow">Part 1</div><h2>What to build</h2></div>
+
+<section id="jobs">
+  <div class="eyebrow">The big picture</div>
+  <h2>Cart Toolkit handles the checkout. What happens after uses tools you already run.</h2>
+  <p>The way to avoid bolting things on later is to keep Cart Toolkit's job small and clear. It owns everything up to and including the moment of purchase, plus handing your answers to Groundhogg. Access, tags and follow-up already have homes on the members site, and Cart Toolkit leaves them there.</p>
+  <div class="lanes">
+    <div class="lane ours">
+      <span class="who">Cart Toolkit</span>
+      <h3>At checkout</h3>
+      <ul><li>Paid checkout forms: which options, which fields</li><li>Free signup forms: the $0 order</li><li>A read-only page showing today's SureCart setup, for the switch-over</li></ul>
+    </div>
+    <div class="lane ours">
+      <span class="who">Cart Toolkit</span>
+      <h3>The hand-off</h3>
+      <ul><li>Every answer written to the order and to the member's Groundhogg contact, through WP Fusion as FC Toolkit already does</li><li>Fixed values a form sets, such as Membership Level = Free</li><li>A failed send is logged and can be resent</li></ul>
+    </div>
+    <div class="lane">
+      <span class="who">Tools you already have</span>
+      <h3>After purchase</h3>
+      <ul><li>FluentCart's own FluentCommunity access (spaces, courses)</li><li>WP Fusion's FluentCart support: Groundhogg tags per product, order and subscription fields</li><li>Groundhogg flows, and FC Toolkit Access turning tags into spaces and courses</li><li class="unk">Anything OttoKit does today that none of these covers</li></ul>
+    </div>
+  </div>
+  <div class="note">WP Fusion added FluentCart support in version 3.47. The members site runs 3.48.2, so tagging buyers in Groundhogg per product probably needs no new code at all. It can't carry custom checkout answers, which is exactly the gap the hand-off fills. Mapping today's OttoKit steps onto this list is the next step, and it's why I need to see them (see <a href="#need">What I need from you</a>).</div>
+</section>
+
+<section id="blocks">
+  <div class="eyebrow">Modular by design</div>
+  <h2>Five building blocks, each written once</h2>
+  <p>Paid forms and free signups are two kinds of the same thing, so they share every block. A later feature, such as plan upgrades or licensing, becomes another page in the same admin and uses these blocks rather than rebuilding them.</p>
+  <div class="blocks">
+    <div class="block"><span class="bn">Block 1</span><h3>Field library</h3><p>The fields a form can use, pulled from Groundhogg with their label, type and choices. You add a Groundhogg field to the library once, and from then on any form can use it. A field that isn't in Groundhogg can't be put on a form, so no answer is ever stranded.</p><div class="uses"><span class="chip acc">Paid forms</span><span class="chip acc">Free signup</span></div></div>
+    <div class="block"><span class="bn">Block 2</span><h3>Forms</h3><p>One list. Each form has a kind (paid checkout or free signup), a product, its options, fields picked from the library, a thank-you page and its own link.</p><div class="uses"><span class="chip acc">Paid forms</span><span class="chip acc">Free signup</span></div></div>
+    <div class="block"><span class="bn">Block 3</span><h3>Form-only prices</h3><p>Tick a price as form-only and it can only be bought through a form that includes it. Old or guessed buy links go to the form that sells it, and the server refuses it anywhere else. Current subscribers keep renewing.</p><div class="uses"><span class="chip acc">Paid forms</span><span class="chip acc">Free signup</span><span class="chip">Every FluentCart buy link</span></div></div>
+    <div class="block"><span class="bn">Block 4</span><h3>Hand-off to Groundhogg</h3><p>One sender. It takes an order's answers and fixed values and writes them to the contact. Both form kinds call it, and so would any later feature.</p><div class="uses"><span class="chip acc">Paid forms</span><span class="chip acc">Free signup</span><span class="chip">Later features</span></div></div>
+    <div class="block"><span class="bn">Block 5</span><h3>Shell: admin, logs, updates</h3><p>The admin page, one log for everything, and GitHub updates. Same pattern as FC Toolkit, so it will feel familiar.</p><div class="uses"><span class="chip acc">Everything</span></div></div>
+  </div>
+</section>
+
+<section id="library">
+  <div class="eyebrow">Your idea, built in</div>
+  <h2>Every form field is a Groundhogg field</h2>
+  <p>Below is a mockup using your real Groundhogg fields, read from go.automationbridge.com. Groundhogg already stores each field's type and choices ("Builder Career Length" has its own choices, "Membership Level" is a dropdown), so the form shows the right kind of input with no setup. On each form, a field is filled in one of four ways:</p>
+  <div class="cards">
+    <div class="scn"><span class="fill"><span class="on">Ask</span></span><span class="if">The buyer answers it</span><span class="then">Shown on the form, optional or required. Example: Business Name, How you operate.</span></div>
+    <div class="scn"><span class="fill"><span class="on">Set</span></span><span class="if">The form sets a fixed value</span><span class="then">Not shown. Example: the free signup sets Membership Level = Free. This may replace some OttoKit steps.</span></div>
+    <div class="scn"><span class="fill"><span class="on">From link</span></span><span class="if">Taken from the page address</span><span class="then">Not shown. Example: <code>?utm_source=podcast</code> fills utm_source, and Conversion URL records the page they bought on.</span></div>
+    <div class="scn"><span class="fill"><span class="on">From order</span></span><span class="if">Taken from the purchase</span><span class="then">Not shown. Example: Member User ID gets the buyer's WordPress user ID, and Membership Plan Type gets the price they chose (Scale, Growth).</span></div>
+  </div>
+  <div class="mock-label"><span class="chip">Mockup</span><span>Cart Toolkit › Forms › Community, public › Fields. Field names are your real Groundhogg fields.</span></div>
+  <div class="browser">
+    <div class="bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="url">wp-admin › Cart Toolkit › Forms › Community, public › Fields</span></div>
+    <div class="admin">
+      <nav><span>Overview</span><span class="on">Forms</span><span>Field library</span><span>Form-only prices</span><span>Current setup</span><span>Logs</span><span>Updates</span></nav>
+      <div class="main lib">
+        <div class="lib-group"><b>Standard</b>
+          <div class="lib-row in"><span class="cb"><i class="x"></i></span><span>Business Name</span><span class="ty">text</span><span class="fill"><span class="on">Ask</span><span>Set</span><span>From link</span></span></div>
+          <div class="lib-row in"><span class="cb"><i class="x"></i></span><span>How you operate <small style="color:var(--warn)">· required</small></span><span class="ty">text</span><span class="fill"><span class="on">Ask</span><span>Set</span><span>From link</span></span></div>
+          <div class="lib-row"><span class="cb"><i></i></span><span>Builder Career Length</span><span class="ty">choice</span><span class="ch">Just started · 3-5 years · 5-10 years</span></div>
+          <div class="lib-row"><span class="cb"><i></i></span><span>CRM Software</span><span class="ty">text</span><span class="ch">Not on this form</span></div>
+        </div>
+        <div class="lib-group"><b>Acquisition</b>
+          <div class="lib-row in"><span class="cb"><i class="x"></i></span><span>utm_source</span><span class="ty">text</span><span class="fill"><span>Ask</span><span>Set</span><span class="on">From link</span></span></div>
+          <div class="lib-row in"><span class="cb"><i class="x"></i></span><span>Conversion URL</span><span class="ty">url</span><span class="fill"><span>Ask</span><span>Set</span><span class="on">From link</span></span></div>
+        </div>
+        <div class="lib-group"><b>Account Info</b>
+          <div class="lib-row in"><span class="cb"><i class="x"></i></span><span>Membership Level = General</span><span class="ty">dropdown</span><span class="fill"><span>Ask</span><span class="on">Set</span><span>From link</span></span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <p>Name, email, phone and address aren't in the library, because FluentCart already collects them and WP Fusion already sends them. One thing to confirm when building: whether Cart Toolkit reads this field list through WP Fusion or straight from Groundhogg. It needs the types and choices, and I haven't yet checked whether WP Fusion keeps those.</p>
+</section>
+
+<section id="plain">
+  <div class="eyebrow">Walk-through</div>
+  <h2>The two questions you asked about, in plain English</h2>
+  <div class="plain">
+    <h3>Form-only prices: decided, kept</h3>
+    <p>A price marked <strong>form-only</strong> can be bought in one way only: through a Cart Toolkit form that includes it. Here's what a visitor sees at each door:</p>
+    <div class="tbl"><table>
+      <thead><tr><th>Where the visitor arrives</th><th>What happens with a form-only price</th></tr></thead>
+      <tbody>
+        <tr><td>Your form's page</td><td>The price is shown and can be bought, if that form includes it.</td></tr>
+        <tr><td>FluentCart's own product page</td><td>Not reachable. The product is set to Private in FluentCart, so its product page isn't public. FluentCart still allows its prices to be sold through forms and links.</td></tr>
+        <tr><td>An old or guessed buy link</td><td>Sent to the form that sells that price. A link for a price that no form includes shows "This option is no longer available."</td></tr>
+        <tr><td>Anything that reaches the checkout some other way</td><td>Refused by the server before an order exists.</td></tr>
+        <tr><td>Someone already paying for it</td><td>Keeps renewing as normal. Renewals never go through the checkout.</td></tr>
+      </tbody>
+    </table></div>
+    <p>For Community Membership, all four prices are form-only. Scale and Growth are on the public form. Guest is on the free signup. Legacy is on no form, so nobody can buy it new, while current Legacy members keep renewing.</p>
+  </div>
+  <div class="plain">
+    <h3>Question 5: an email that already has a login</h3>
+    <p>You're right that it works like your current cart: name and email, then everything syncs. This question is about one case only.</p>
+    <p class="story">Jane had a members-site login a year ago. Today she isn't logged in, and she signs up (or buys) with that same email. FluentCart makes her order but deliberately <strong>doesn't connect it to her existing login</strong>, in case the email was typed by someone else. Its FluentCommunity access still finds her by email and adds her. But when she later cancels or gets a refund, the removal only looks at connected logins, so <strong>her access would never be taken away</strong>.</p>
+    <p>The fix is for Cart Toolkit to connect the order to her existing login automatically, without logging anyone in. The only risk is that a stranger who types Jane's email gives Jane's own account access it didn't ask for. They gain nothing from that, because they still can't log in as her. This applies to paid forms as well as the free signup. My recommendation: connect it.</p>
+  </div>
+</section>
+
+<section id="need">
+  <div class="eyebrow">Today's setup</div>
+  <h2>Your paid-member flow, step by step</h2>
+  <p>From your OttoKit screenshot, plus the Groundhogg flows each tag starts, which I read on go.automationbridge.com. OttoKit keeps each step's exact settings on its own servers, so steps marked "likely" are inferred from their names and from what Groundhogg does next.</p>
+  <div class="tbl"><table>
+    <thead><tr><th>#</th><th>OttoKit step today</th><th>What it actually does</th><th>After the switch</th></tr></thead>
+    <tbody>
+      <tr><td>1</td><td>SureCart: Purchase Created</td><td>Starts the flow when anyone buys.</td><td>FluentCart's "order paid". No OttoKit.</td></tr>
+      <tr><td>2</td><td>Filter</td><td>Likely: only continue for Community Membership.</td><td>Not needed. Each product, and each form, has its own settings.</td></tr>
+      <tr><td>3</td><td>WordPress: Find User By Email</td><td>Gets the member's WordPress user ID.</td><td>FluentCart creates or connects the user itself (question 5).</td></tr>
+      <tr><td>4</td><td>Groundhogg: Create/Update Contact</td><td>Makes the Groundhogg contact. Likely sets Membership Plan Type (Scale, Growth...) too.</td><td>WP Fusion creates the contact. Cart Toolkit's hand-off sets Membership Plan Type.</td></tr>
+      <tr><td>5</td><td>Add tag to start Onboarding Flow</td><td><code>start_Membership Activated</code> starts Groundhogg flow "1. Membership Enrollment &amp; Activation" (details below).</td><td>WP Fusion's FluentCart product setting applies the same tag. No code.</td></tr>
+      <tr><td>6</td><td>Add tag for SureCart processor</td><td><code>payment_processor_SureCart</code>. No Groundhogg flow uses it. It's a label only.</td><td>Apply <code>payment_processor_FluentCart</code> the same way, or drop it.</td></tr>
+      <tr><td>7</td><td>Add tag to sync Member ID</td><td><code>trigger_Sync Member ID</code>. No Groundhogg flow uses it, but OttoKit on go.automationbridge.com listens for tags. It likely copies the WordPress user ID into "Member User ID", which starts flow "Send New User Credentials".</td><td>Cart Toolkit's hand-off sets Member User ID directly. The tag and that second OttoKit automation go away.</td></tr>
+      <tr><td>8</td><td>Webhooks: Push Deck notification</td><td>A push to your phone.</td><td>Move into Groundhogg flow 4 as a webhook step. No code.</td></tr>
+      <tr><td>9</td><td>Slack: message to channel</td><td>Posts to Slack.</td><td>Groundhogg already has a "Send Slack Message" flow, started by setting the Slack Message field. Add that to flow 4. No code.</td></tr>
+    </tbody>
+  </table></div>
+  <div class="plain">
+    <h3>What Groundhogg flow 4 does once the tag lands (unchanged by the switch)</h3>
+    <p>Sends "Welcome + Password Setup + Community". Removes <code>points_Lose 100</code>. Sets Membership Level to General, Date: Membership Join and Date: Rebill to today, and adds 1 to Membership Billing Count. Applies <code>PRODUCT: ASP Program</code>. Posts the member's details to data.automationbridge.com. Applies <code>start_Member Onboarding</code>, though the flow it starts is switched off. After a minute it applies <code>toolkit_WPF Update</code> so the members site pulls the new tags.</p>
+  </div>
+  <div class="cards">
+    <div class="scn"><span class="chip good tag">Simpler</span><span class="if">9 OttoKit steps across two automations become two automatic hand-offs</span><span class="then">WP Fusion applies the tag that starts flow 4. Cart Toolkit sends Membership Plan Type, Member User ID and the form's answers. Everything else stays in Groundhogg, where it already is.</span></div>
+    <div class="scn"><span class="chip warn tag">Worth checking</span><span class="if">A new member may get up to three password emails</span><span class="then">Flow 4's "Welcome + Password Setup", flow 44's "Username + Password Setup" when Member User ID is set, and, after the switch, WordPress's own new-user email. FluentCart has a switch to stop WordPress's. You pick which one stays.</span></div>
+    <div class="scn"><span class="chip acc tag">New fill mode</span><span class="if">"From the order"</span><span class="then">Member User ID and Membership Plan Type change per buyer, so a fixed value won't do. Fields get a fourth fill mode: taken from the order (user ID, price name, order date).</span></div>
+  </div>
+  <div class="note">Still missing: the free-member flow. On the members site, OttoKit's other trigger is a WS Form submission, so that's probably your free signup. A screenshot of it would help, or a working OttoKit MCP connection (see Decisions).</div>
+</section>
+
+<section id="decide">
+  <div class="eyebrow">Your answers</div>
+  <h2>Decisions</h2>
+  <p>Open questions first. Your earlier answers are underneath and can still be changed.</p>
+  <div id="db-offline" class="offline" hidden>Answers can't be saved in this view. Open the page while signed in to claude.ai, or reply in chat.</div>
+  <div class="decisions" id="decisions-open"></div>
+  <div class="group-label">Settled</div>
+  <div class="decisions" id="decisions-settled"></div>
+</section>
+
+<div class="part"><div class="eyebrow">Part 2</div><h2>Technical detail, for the record</h2><p class="lede" style="font-size:0.95rem">How the pieces above plug into FluentCart. You can skip this part. It's here so nothing gets lost between sessions.</p></div>
+
+<section id="journey">
+  <div class="eyebrow">Feature 1</div>
+  <h2>A buyer's path through a checkout form</h2>
+  <div class="flow">
+    <div class="step"><b>Opens the form</b><span>On any page with the shortcode or block, or through the form's own link.</span></div>
+    <div class="step ours"><b>A cart is made for this form</b><span>Holds the form's first option and is tagged with the form, server-side. Locked so nothing else can be added.</span></div>
+    <div class="step ours"><b>Picks an option, fills in fields</b><span>Sees only this form's options, plus this form's extra fields.</span></div>
+    <div class="step"><b>Pays</b><span>FluentCart's own checkout, Stripe or PayPal. Nothing about payment changes.</span></div>
+    <div class="step ours"><b>Server checks the order</b><span>Rejects any option the form doesn't allow and any missing answer, before an order exists.</span></div>
+    <div class="step ours"><b>Answers saved to the order</b><span>Shown on the order screen and sent to your CRM.</span></div>
+    <div class="step"><b>Access granted</b><span>FluentCart's normal after-purchase steps run as usual.</span></div>
+  </div>
+  <div class="legend"><span><i></i>FluentCart, unchanged</span><span><i class="ours"></i>Added by Cart Toolkit</span></div>
+</section>
+
+<section id="community">
+  <div class="eyebrow">The real example</div>
+  <h2>Community Membership: one product, four prices</h2>
+  <p>The prices as they are in SureCart today, and where each can be bought after the switch. All four are form-only, and the product is Private in FluentCart.</p>
+  <div class="tbl">
+    <table>
+      <thead><tr><th>Price</th><th>Form-only</th><th>Public checkout form</th><th>Free signup form</th><th>FluentCart's product page or buy link</th><th>Existing subscribers renew</th></tr></thead>
+      <tbody>
+        <tr><td><b>Scale</b> · $999 / yr</td><td>Yes</td><td class="c"><span class="yes"><svg><use href="#i-check"/></svg>Shown</span></td><td class="c"><span class="no"><svg><use href="#i-x"/></svg>No</span></td><td class="c"><span class="lock"><svg><use href="#i-lock"/></svg>Sent to the form</span></td><td class="c"><span class="yes"><svg><use href="#i-check"/></svg>Yes</span></td></tr>
+        <tr><td><b>Growth</b> · $299 / 3 mo</td><td>Yes</td><td class="c"><span class="yes"><svg><use href="#i-check"/></svg>Shown</span></td><td class="c"><span class="no"><svg><use href="#i-x"/></svg>No</span></td><td class="c"><span class="lock"><svg><use href="#i-lock"/></svg>Sent to the form</span></td><td class="c"><span class="yes"><svg><use href="#i-check"/></svg>Yes</span></td></tr>
+        <tr><td><b>Legacy</b> · $99 / mo</td><td>Yes</td><td class="c"><span class="no"><svg><use href="#i-x"/></svg>Not on it</span></td><td class="c"><span class="no"><svg><use href="#i-x"/></svg>No</span></td><td class="c"><span class="no"><svg><use href="#i-x"/></svg>"No longer available"</span></td><td class="c"><span class="yes"><svg><use href="#i-check"/></svg>Yes</span></td></tr>
+        <tr><td><b>Guest</b> · $0</td><td>Yes</td><td class="c"><span class="no"><svg><use href="#i-x"/></svg>Not on it</span></td><td class="c"><span class="yes"><svg><use href="#i-check"/></svg>The only way in</span></td><td class="c"><span class="lock"><svg><use href="#i-lock"/></svg>Sent to free signup</span></td><td class="c">n/a</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="pair">
+    <div class="panel before"><h3>Today in FluentCart</h3><ul><li>One checkout page for every product</li><li>An extra field shows on every checkout</li><li>The product page lists all four options</li><li>Hiding options means separate products</li></ul></div>
+    <div class="panel after"><h3>With Cart Toolkit</h3><ul><li>As many forms as you want, each with its own link</li><li>Fields belong to one form only</li><li>Each form shows the options you tick</li><li>Same single product, checked on the server</li></ul></div>
+  </div>
+</section>
+
+<section id="mock">
+  <div class="eyebrow">Mockup</div>
+  <h2>What the buyer sees on the form's page</h2>
+  <div class="mock-label"><span class="chip">Example content and prices</span><span>Dashed boxes are Cart Toolkit. Everything else is FluentCart's own checkout, in your theme.</span></div>
+  <div class="browser">
+    <div class="bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="url">yoursite.com/join/?fct_cart_hash=8f2c…</span></div>
+    <div class="page">
+      <div class="col">
+        <div><h4>Join the community</h4><span class="fc-tag">Your page content, then the form</span></div>
+        <div class="fld ours"><em>Cart Toolkit · options for this form</em>
+          <div class="opts">
+            <div class="opt on"><span class="r"></span><span class="t">Scale</span><span class="p">$999 / yr</span></div>
+            <div class="opt"><span class="r"></span><span class="t">Growth</span><span class="p">$299 / 3 mo</span></div>
+          </div>
+        </div>
+        <div class="fld"><label>Email</label><div class="in"></div></div>
+        <div class="grid2"><div class="fld"><label>First name</label><div class="in"></div></div><div class="fld"><label>Last name</label><div class="in"></div></div></div>
+        <div class="fld ours"><em>Cart Toolkit · this form's Groundhogg fields</em>
+          <div class="fld"><label>How you operate *</label><div class="in tall"></div></div>
+          <div class="fld"><label>Business Name</label><div class="in"></div></div>
+        </div>
+        <div class="pay">Stripe / PayPal (FluentCart)</div>
+        <div class="btn">Place order</div>
+      </div>
+      <div class="col">
+        <span class="fc-tag">Order summary (FluentCart)</span>
+        <div class="sumrow"><span>Community Membership, Scale</span><span class="mono">$999.00</span></div>
+        <div class="sumrow"><span>Coupon</span><span class="mono">On or off per form</span></div>
+        <div class="sumrow tot"><span>Total</span><span class="mono">$999.00</span></div>
+      </div>
+    </div>
+  </div>
+  <p>Picking the other option swaps the item in the cart on the server and refreshes the summary. If the switch changes the payment type (for example a one-time option and a subscription on the same form), the page reloads so the payment box is rebuilt correctly.</p>
+</section>
+
+<section id="checks">
+  <div class="eyebrow"><svg width="13" height="13" style="vertical-align:-1px"><use href="#i-shield"/></svg> Server-side</div>
+  <h2>What the server checks when the buyer clicks Place order</h2>
+  <p>Run inside FluentCart's own validation step, before any order or charge exists. A failed check shows its message on the checkout, the way FluentCart shows its own errors.</p>
+  <div class="checklist">
+    <div class="ck"><span class="n">1</span><span class="q">Is this cart tagged with a form, and does that form still exist and is it switched on?</span><span class="a">The tag is set by the server when the cart is made. The buyer can't edit it.</span></div>
+    <div class="ck"><span class="n">2</span><span class="q">Is every item in the cart one of this form's options?</span><span class="a">Otherwise: "That option isn't available on this form."</span></div>
+    <div class="ck"><span class="n">3</span><span class="q">Is any item a form-only price that this form doesn't include?</span><span class="a">Also covers carts made by FluentCart's own buy links, which belong to no form.</span></div>
+    <div class="ck"><span class="n">4</span><span class="q">Is every required field answered, and does each answer fit its type?</span><span class="a">An email field must be an email, a choice must be one of its options, and so on.</span></div>
+  </div>
+</section>
+
+<section id="hooks">
+  <div class="eyebrow">For the record</div>
+  <h2>Where each piece plugs in</h2>
+  <p>Every hook below exists in the stock 2.3.2 release. File references are in <code>Agents.md</code>.</p>
+  <div class="tbl">
+    <table>
+      <thead><tr><th>Piece</th><th>FluentCart extension point</th><th>What Cart Toolkit does there</th></tr></thead>
+      <tbody>
+        <tr><td>Form's own link</td><td><code>fluent_cart_action_{name}</code> route</td><td><code>?fluent-cart=ctk_form&amp;form=community</code> makes the tagged, locked cart and redirects to the form's page.</td></tr>
+        <tr><td>Form on any page</td><td>Our shortcode and block, drawn with FluentCart's checkout renderer</td><td>A page holding the form without a cart in its address makes one and redirects to itself, so every checkout request uses that cart.</td></tr>
+        <tr><td>Cart tag</td><td>Cart <code>checkout_data</code></td><td>Stores the form id. The browser can't write to this.</td></tr>
+        <tr><td>Option picker</td><td><code>fluent_cart/checkout/route_response</code></td><td>Our own checkout request swaps the item after checking it's allowed.</td></tr>
+        <tr><td>Extra fields</td><td><code>fluent_cart/after_customer_details</code></td><td>Draws this form's fields. Works with both the checkout shortcode and the block.</td></tr>
+        <tr><td>Server checks</td><td><code>fluent_cart/checkout/validate_data</code></td><td>The four checks above.</td></tr>
+        <tr><td>Save answers</td><td><code>fluent_cart/checkout/prepare_other_data</code></td><td>Writes the form id and answers to order meta.</td></tr>
+        <tr><td>Show on order</td><td><code>fluent_cart/widgets/single_order_page</code></td><td>A "Form answers" card on the order screen.</td></tr>
+        <tr><td>Hand-off to Groundhogg</td><td><code>fluent_cart/order_paid_done</code>, after WP Fusion's own FluentCart step</td><td>Writes answers and fixed values to the contact through WP Fusion, logs the result, and fires <code>cart_toolkit/form_order_paid</code> for anything else.</td></tr>
+        <tr><td>Old buy links</td><td><code>init</code>, before FluentCart's instant-checkout route (priority 99)</td><td>A buy link for a form-only price redirects to the form that sells it.</td></tr>
+        <tr><td>Existing login</td><td>Before payment, in our checkout step</td><td>Connects the customer to the WP account with that email, so FluentCart can later remove access too.</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section id="admin">
+  <div class="eyebrow">Mockups</div>
+  <h2>Admin screens</h2>
+  <div class="mock-label"><span class="chip">Example content</span><span>Cart Toolkit gets its own admin page, laid out like FC Toolkit.</span></div>
+  <div class="browser">
+    <div class="bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="url">wp-admin › Cart Toolkit › Forms › Community, public</span></div>
+    <div class="admin">
+      <nav><span>Overview</span><span class="on">Forms</span><span>Field library</span><span>Form-only prices</span><span>Current setup</span><span>Logs</span><span>Updates</span></nav>
+      <div class="main">
+        <div class="grid2">
+          <div class="fld"><label>Form name</label><div class="sel">Community, public</div></div>
+          <div class="fld"><label>Type</label><div class="sel">Paid checkout</div></div>
+          <div class="fld"><label>Product</label><div class="sel">Community Membership</div></div>
+          <div class="fld"><label>Link</label><div class="sel mono" style="font-size:0.76rem">?fluent-cart=ctk_form&amp;form=community</div></div>
+        </div>
+        <div class="fld"><label>Options on this form</label>
+          <div class="checks">
+            <div class="cb"><i></i>Legacy <small>· $99 a month · inactive</small></div>
+            <div class="cb"><i class="x"></i>Scale <small>· $999 a year · shown first</small></div>
+            <div class="cb"><i class="x"></i>Growth <small>· $299 every 3 months</small></div>
+            <div class="cb"><i></i>Guest <small>· $0 · inactive</small></div>
+          </div>
+        </div>
+        <div class="fld"><label>Fields on this form</label>
+          <div class="tbl"><table class="fields-tbl"><thead><tr><th>Groundhogg field</th><th>Filled by</th><th>Required</th></tr></thead><tbody>
+            <tr><td>How you operate</td><td>Ask</td><td>Yes</td></tr>
+            <tr><td>Business Name</td><td>Ask</td><td>No</td></tr>
+            <tr><td>utm_source</td><td>From link</td><td>n/a</td></tr>
+            <tr><td>Membership Level</td><td>Set: General</td><td>n/a</td></tr>
+          </tbody></table></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <p>Input types follow the Groundhogg field's type: text, paragraph, number, date, url, dropdown and checkboxes. Choosing a product and then its options is a two-step save, since admin pages here don't use background requests.</p>
+  <div class="pair">
+    <div class="card">
+      <div class="fc-tag">FluentCart order #1042 · sidebar card added by Cart Toolkit</div>
+      <h3>Form answers</h3>
+      <dl class="kv">
+        <dt>Form</dt><dd>Community, public</dd>
+        <dt>How you operate</dt><dd>Solo, with a part-time VA</dd>
+        <dt>Business Name</dt><dd>Example Studio</dd>
+        <dt>Sent to Groundhogg</dt><dd>Yes, 12:04</dd>
+      </dl>
+    </div>
+    <div class="card">
+      <div class="fc-tag">Cart Toolkit › Form-only prices</div>
+      <h3>Can only be bought through a form</h3>
+      <div class="checks">
+        <div class="cb"><i class="x"></i>Scale <small>· sold on: Community, public</small></div>
+        <div class="cb"><i class="x"></i>Growth <small>· sold on: Community, public</small></div>
+        <div class="cb"><i class="x"></i>Guest <small>· sold on: Free signup</small></div>
+        <div class="cb"><i class="x"></i>Legacy <small>· on no form: can't be bought new, current members still renew</small></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="free">
+  <div class="eyebrow">Feature 2</div>
+  <h2>Free signup: a $0 order with no checkout page</h2>
+  <p>The free signup is a second kind of form in the same Forms list. It uses the same field builder but has no options and no payment box. On submit, Cart Toolkit runs the same steps FluentCart's own checkout runs for a $0 order, so everything that follows a real purchase happens: the order, the customer, the WP user, the receipt email, your access feeds and the CRM.</p>
+  <div class="flow">
+    <div class="step"><b>Name, email, your fields</b><span>On any page, through the shortcode or block.</span></div>
+    <div class="step ours"><b>Spam guards</b><span>Hidden honeypot, our own rate limit, and Turnstile if FluentCart has it switched on.</span></div>
+    <div class="step ours"><b>Match or create the customer</b><span>Same lookup FluentCart's checkout uses, by email.</span></div>
+    <div class="step ours"><b>Build the $0 order</b><span>FluentCart's own order builder, with the Free option.</span></div>
+    <div class="step"><b>FluentCart's $0 payment step</b><span>The built-in path FluentCart uses for any $0 checkout. Marks the order paid.</span></div>
+    <div class="step"><b>After-purchase steps</b><span>WP user, receipt email, access feeds. Started at once, not left for the background queue.</span></div>
+    <div class="step ours"><b>Thank-you page</b><span>Redirects to the page you choose for that form.</span></div>
+  </div>
+  <div class="cards">
+    <div class="scn"><span class="chip good tag">Simple case</span><span class="if">A new email signs up</span><span class="then">Customer, WP user and $0 order are created. FluentCart logs them in and WordPress sends the set-password email.</span></div>
+    <div class="scn"><span class="chip acc tag">Handled</span><span class="if">A FluentCart customer signs up again</span><span class="then">If they already have the Free option, no second order is made and they go straight to the thank-you page.</span></div>
+    <div class="scn"><span class="chip warn tag">Question 5</span><span class="if">The email already has a WP account, not logged in</span><span class="then">FluentCart doesn't connect the order to that login, so a later cancel wouldn't remove access. Recommended: Cart Toolkit connects it, without logging anyone in.</span></div>
+    <div class="scn"><span class="chip acc tag">Decided</span><span class="if">Someone types another person's email</span><span class="then">Access is granted right away, as you chose, with the spam guards in place. That person gets a set-password email they didn't ask for, the same as with AutoKit today.</span></div>
+    <div class="scn"><span class="chip acc tag">Worth knowing</span><span class="if">The Free option is a $0 subscription</span><span class="then">FluentCart makes it active with no renewal date, so it never expires. A $0 one-time option works the same way for access.</span></div>
+    <div class="scn"><span class="chip bad tag">Refused</span><span class="if">The form's option costs money</span><span class="then">The form editor and the server both refuse any option that isn't $0, so a mistake can never give away a paid plan.</span></div>
+  </div>
+</section>
+
+<section id="limits">
+  <div class="eyebrow">From the source</div>
+  <h2>Limits found in the source, and what the plan does about them</h2>
+  <div class="risks">
+    <div class="risk"><h3>One checkout per page</h3><p>FluentCart's checkout script can only run once on a page.</p><p class="fix">One checkout form per page. Free signup forms don't use that script, so one can sit beside a checkout form.</p></div>
+    <div class="risk"><h3>No option picker in free FluentCart</h3><p>The checkout shows its items read-only. There is no filter on a product's option list.</p><p class="fix">Cart Toolkit draws its own picker and swaps the item on the server, using the same method as FluentCart's order bump.</p></div>
+    <div class="risk"><h3>The form page needs the cart in its address</h3><p>The checkout script only sends a cart reference when the page address carries one.</p><p class="fix">The form's page redirects to itself with the cart added, the same way FluentCart's own buy links do.</p></div>
+    <div class="risk"><h3>No CRM custom fields in FluentCart's FluentCRM feed</h3><p>Its custom field mapping is commented out, and no filter reaches the contact data.</p><p class="fix">Cart Toolkit writes the answers itself after payment, once FluentCart's feed has made the contact.</p></div>
+    <div class="risk"><h3>Products with attribute options</h3><p>Products built with FluentCart's attribute options (size by colour and so on) take a different path.</p><p class="fix">The first build supports simple options, which is how your community product is set up. Attribute products come later, if needed.</p></div>
+    <div class="risk"><h3>Pro would also claim some settings</h3><p>Pro uses <code>variant_ids</code> on the checkout shortcode.</p><p class="fix">Cart Toolkit uses its own names (<code>[cart_toolkit_form]</code>), so it never clashes if Pro is installed later.</p></div>
+  </div>
+</section>
+
+<section id="rollout">
+  <div class="eyebrow">Order of work</div>
+  <h2>Rollout</h2>
+  <ol class="tl">
+        <li><b><span class="v">0.1.0</span>Shell, GitHub updates and Current setup</b><span>Admin page, Overview, Logs, the shared updater, and the read-only page that shows today's SureCart, WP Fusion and SureMembers setup. You upload this one zip once. After that, every release installs by command.</span></li>
+    <li><b><span class="v">0.2.0</span>Field library and hand-off</b><span>Groundhogg fields pulled in, and the sender that writes answers to the contact. Built first because both form kinds depend on it.</span></li>
+    <li><b><span class="v">0.3.0</span>Forms and form-only prices</b><span>The Forms list and editor, and the form-only setting with its buy-link redirect.</span></li>
+    <li><b><span class="v">0.4.0</span>Paid form on the page</b><span>Shortcode, block, form link, option picker, the server checks, saved answers, the order screen card, connecting existing logins.</span></li>
+    <li class="gate"><b>Test on a staging copy of members.automationbridge.com with Stripe in test mode</b><span>Every option, a refused option, a missing answer, a coupon, a renewal, and a check that the Groundhogg contact got every value. Nothing goes live before this passes.</span></li>
+    <li><b><span class="v">0.5.0</span>Free signup forms</b><span>The $0 order path, spam guards and the cases above. Tested on staging the same way.</span></li>
+    <li class="gate"><b>Switch from SureCart and OttoKit</b><span>Install FluentCart on the members site, point your buttons at the new forms, then retire the old setup.</span></li>
+  </ol>
+  <div class="note"><b>Features 3 and 4</b> (plan changes, failed-renewal retries, installments, licensing) stay parked as the handoff asks. I'll come back with questions about them once forms and free signup are live.</div>
+</section>
+
+</div>
+
+<script>
+const QUESTIONS = [
+  { id: "q5_existing", group: "open", title: "An email that already has a login: connect the order to it?",
+    why: "Explained in plain English above, under Question 5. Applies to paid forms and the free signup.",
+    choices: [
+      { v: "link", b: "Yes, connect it automatically", rec: true, s: "Nobody is logged in by it. Cancels and refunds then remove access correctly." },
+      { v: "login", b: "Ask them to log in first", s: "Stricter, but adds a step for returning members." } ] },
+  { id: "q9_blocks", group: "open", title: "Are the four building blocks the right shape?",
+    why: "Field library, forms, hand-off to Groundhogg, and the shell. If something you expect has no home in them, say so here.",
+    choices: [
+      { v: "yes", b: "Yes, that's the shape", s: "I'll map your automation onto it next." },
+      { v: "changes", b: "Something's missing or wrong", s: "Tell me what in the note." } ] },
+  { id: "q10_tags", group: "open", title: "Should a form apply Groundhogg tags of its own?",
+    why: "WP Fusion can already tag by product. Form-level tags only matter if two forms for the same product need different tags, such as a public form and a promo form.",
+    choices: [
+      { v: "decide_later", b: "Decide after mapping the automation", rec: true, s: "The screenshots will show whether per-form tags are needed." },
+      { v: "yes", b: "Yes, forms need their own tags", s: "The hand-off also applies the tags you choose per form." },
+      { v: "no", b: "No, per product is enough", s: "Tags stay in WP Fusion's product settings." } ] },
+  { id: "q12_password", group: "open", title: "Which password email should a new member get?",
+    why: "Today a new member can get two from Groundhogg (flow 4 and flow 44). After the switch, WordPress would add its own. One is enough.",
+    choices: [
+      { v: "flow4", b: "Groundhogg flow 4's \"Welcome + Password Setup + Community\"", rec: true, s: "One welcome email with everything in it. Flow 44 and WordPress's email are switched off." },
+      { v: "flow44", b: "Groundhogg flow 44's \"Username + Password Setup\"", s: "A separate credentials email. Flow 4's welcome drops its password part." },
+      { v: "wordpress", b: "WordPress's own email", s: "Plain, sent by the members site." } ] },
+  { id: "q11_setup", group: "open", title: "How do I see the free-member flow?",
+    why: "OttoKit rejected the MCP key in server.txt (\"Invalid server key\"). The file is untouched.",
+    choices: [
+      { v: "new_key", b: "I'll regenerate the OttoKit MCP URL", rec: true, s: "Save it over server.txt. I'll test it, move it to the Keychain and shred the file." },
+      { v: "screens", b: "I'll send a screenshot of the free flow", s: "Like the paid one." } ] },
+  { id: "q3_lock", group: "settled", title: "Form-only prices?",
+    why: "All four Community Membership prices are form-only, and the product is Private in FluentCart.",
+    choices: [
+      { v: "lock", b: "Yes, prices can only be bought through a form", s: "" },
+      { v: "hide", b: "No", s: "" } ] },
+  { id: "q1_site", group: "settled", title: "Which site will Cart Toolkit run on?",
+    why: "FluentCart isn't installed there yet. It goes in at the switch-over step.",
+    choices: [
+      { v: "members", b: "members.automationbridge.com", s: "Same site as FC Toolkit and the community." },
+      { v: "main", b: "automationbridge.com", s: "The main site." },
+      { v: "other", b: "Another site", s: "Name it in the note." } ] },
+  { id: "q2_crm", group: "settled", title: "Where should form answers go?",
+    why: "Sent through WP Fusion, which the members site already uses to talk to Groundhogg.",
+    choices: [
+      { v: "groundhogg", b: "Groundhogg on go.automationbridge.com", s: "Every form field is a Groundhogg field." },
+      { v: "fluentcrm", b: "FluentCRM on the same site", s: "" },
+      { v: "event", b: "Just fire an event for now", s: "" } ] },
+  { id: "q4_place", group: "settled", title: "Where does a paid form appear?",
+    why: "Shortcode or block on any page, with the form's link opening that page.",
+    choices: [
+      { v: "embed", b: "On any page I choose", s: "" },
+      { v: "checkout", b: "On FluentCart's checkout page", s: "" } ] },
+  { id: "q6_confirm", group: "settled", title: "Free signup: confirm the email before access?",
+    why: "Spam guards still apply.",
+    choices: [
+      { v: "instant", b: "No, grant access right away", s: "Like AutoKit today." },
+      { v: "confirm", b: "Yes, email a confirm link first", s: "" } ] },
+  { id: "q7_repo", group: "settled", title: "Create the private GitHub repo automationbridge/cart-toolkit?",
+    why: "I'll create it when building starts, after the automation is mapped.",
+    choices: [
+      { v: "yes", b: "Yes, create it", s: "" },
+      { v: "wait", b: "Not yet", s: "" } ] }
+];
+
+function el(tag, attrs, kids) {
+  const n = document.createElement(tag);
+  for (const k in attrs || {}) {
+    if (k === "text") n.textContent = attrs[k];
+    else if (k === "cls") n.className = attrs[k];
+    else n.setAttribute(k, attrs[k]);
+  }
+  for (const c of kids || []) if (c) n.appendChild(c);
+  return n;
+}
+
+const state = {};
+let db = null;
+
+function setStatus(id, text, cls) {
+  const s = document.getElementById("st-" + id);
+  if (!s) return;
+  s.textContent = text;
+  s.className = "status" + (cls ? " " + cls : "");
+}
+
+function render() {
+  for (const q of QUESTIONS) {
+    const root = document.getElementById(q.group === "settled" ? "decisions-settled" : "decisions-open");
+    const choices = q.choices.map(c => {
+      const input = el("input", { type: "radio", name: q.id, value: c.v, id: q.id + "-" + c.v });
+      input.addEventListener("change", () => save(q.id));
+      const b = el("b", { text: c.b });
+      if (c.rec) b.appendChild(el("span", { cls: "rec", text: "Recommended" }));
+      return el("label", { cls: "choice", for: q.id + "-" + c.v }, [input, el("span", {}, [b, c.s ? el("small", { text: c.s }) : null])]);
+    });
+    const note = el("textarea", { id: "note-" + q.id, placeholder: "Note (optional)", "aria-label": "Note for " + q.title });
+    let t = null;
+    note.addEventListener("input", () => { clearTimeout(t); setStatus(q.id, "Editing…"); t = setTimeout(() => save(q.id), 700); });
+    root.appendChild(el("div", { cls: "dq" }, [
+      el("div", { cls: "dq-head" }, [el("h3", { text: q.title }), el("span", { cls: "status", id: "st-" + q.id })]),
+      el("p", { cls: "why", text: q.why }),
+      el("div", { cls: "choices" }, choices),
+      note
+    ]));
+  }
+}
+
+function readForm(id) {
+  const picked = document.querySelector('input[name="' + id + '"]:checked');
+  return { choice: picked ? picked.value : "", note: document.getElementById("note-" + id).value };
+}
+
+async function save(id) {
+  if (!db) { setStatus(id, "Not saved", "err"); return; }
+  const v = readForm(id);
+  setStatus(id, "Saving…");
+  try {
+    await db.collection("decisions").doc(id).set({ choice: v.choice, note: v.note, updatedAt: new Date().toISOString() });
+    state[id] = v;
+    setStatus(id, "Saved", "saved");
+  } catch (e) {
+    setStatus(id, "Not saved", "err");
+  }
+}
+
+function apply(id, data) {
+  const note = document.getElementById("note-" + id);
+  if (!note) return;
+  if (document.activeElement !== note) note.value = data.note || "";
+  if (data.choice) {
+    const r = document.getElementById(id + "-" + data.choice);
+    if (r) r.checked = true;
+  }
+  setStatus(id, data.choice || data.note ? "Saved" : "", data.choice || data.note ? "saved" : "");
+}
+
+render();
+
+(async () => {
+  try {
+    db = window.claude && window.claude.use ? await window.claude.use("db") : null;
+  } catch (e) { db = null; }
+  if (!db) { document.getElementById("db-offline").hidden = false; return; }
+  const timer = setTimeout(() => { document.getElementById("db-offline").hidden = false; }, 10000);
+  db.collection("decisions").onSnapshot(snap => {
+    clearTimeout(timer);
+    document.getElementById("db-offline").hidden = true;
+    for (const d of snap.docs) if (d.exists) apply(d.id, d.data() || {});
+  }, () => { clearTimeout(timer); document.getElementById("db-offline").hidden = false; });
+})();
+</script>

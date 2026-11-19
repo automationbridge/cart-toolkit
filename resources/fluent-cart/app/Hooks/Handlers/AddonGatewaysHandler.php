@@ -1,0 +1,92 @@
+<?php
+
+namespace FluentCart\App\Hooks\Handlers;
+
+use FluentCart\App\Modules\PaymentMethods\Core\GatewayManager;
+use FluentCart\App\Modules\PaymentMethods\PromoGateways\Addons\PaystackAddon;
+use FluentCart\App\Modules\PaymentMethods\PromoGateways\Addons\RazorpayAddon;
+use FluentCart\App\Modules\PaymentMethods\PromoGateways\Addons\MercadoPagoAddon;
+use FluentCart\App\Modules\PaymentMethods\PromoGateways\Addons\FlutterwaveAddon;
+use FluentCart\App\Modules\PaymentMethods\PromoGateways\Addons\SquareAddon;
+use FluentCart\App\Modules\PaymentMethods\PromoGateways\Addons\AirwallexAddon;
+use FluentCart\App\Modules\PaymentMethods\PromoGateways\Addons\SslcommerzAddon;
+
+class AddonGatewaysHandler
+{
+    /**
+     * Default addon gateways to register
+     * @var array
+     */
+    protected $defaultGateways = [
+        'paystack'    => PaystackAddon::class,
+        'razorpay'    => RazorpayAddon::class,
+        'mercado_pago' => MercadoPagoAddon::class,
+        'flutterwave' => FlutterwaveAddon::class,
+        'square'      => SquareAddon::class,
+        'airwallex'   => AirwallexAddon::class,
+        'sslcommerz'  => SslcommerzAddon::class,
+    ];
+    
+    public function register()
+    {
+        add_action('fluent_cart/register_payment_methods', [$this, 'registerPromoGateways'], 20);
+    }
+    
+    /**
+     * Register addon gateways
+     * Can be filtered to add or remove gateways
+     */
+    public function registerPromoGateways()
+    {
+        // Allow filtering of addon gateways
+        $gateways = apply_filters('fluent_cart/addon_gateways', $this->defaultGateways);
+        
+        foreach ($gateways as $slug => $addonClass) {
+            // Skip if class doesn't exist
+            if (!class_exists($addonClass)) {
+                continue;
+            }
+            
+            $isGatewayRegistered = GatewayManager::has($slug);
+            if (!$isGatewayRegistered) {
+                $gateway = GatewayManager::getInstance();
+                try {
+                    $gateway->register($slug, new $addonClass());
+                } catch (\Exception $e) {
+                    // Skip a broken add-on gateway so the others still register.
+                    /**
+                     * Fires when a payment gateway throws while registering.
+                     *
+                     * @param array $payload ['slug' => string, 'source' => 'addon'|'promo', 'exception' => \Exception]
+                     */
+                    do_action('fluent_cart/payment_gateway/registration_failed', [
+                        'slug'      => $slug,
+                        'source'    => 'addon',
+                        'exception' => $e,
+                    ]);
+                }
+            }
+        }
+    }
+    
+    /**
+     * Add a new addon gateway to the default list
+     * 
+     * @param string $slug
+     * @param string $className
+     */
+    public function addGateway($slug, $className)
+    {
+        $this->defaultGateways[$slug] = $className;
+    }
+    
+    /**
+     * Remove an addon gateway from the default list
+     * 
+     * @param string $slug
+     */
+    public function removeGateway($slug)
+    {
+        unset($this->defaultGateways[$slug]);
+    }
+}

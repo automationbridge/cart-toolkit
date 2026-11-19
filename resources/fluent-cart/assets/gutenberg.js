@@ -1,0 +1,1 @@
+window.addEventListener("load",e=>{typeof wp<"u"&&wp.editPost&&(wp.editPost.initializeEditor("gutenberg-editor","fluent-products",window.post_id,window.gutenSettings,window.gutenContext),wp.data.subscribe(()=>{const t=wp.data.select("core/editor").getEditedPostContent();window.parent.postMessage({type:"gutenbergContentChanged",content:t},"*")}))});

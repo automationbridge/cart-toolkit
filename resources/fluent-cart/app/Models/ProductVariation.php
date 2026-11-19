@@ -1,0 +1,566 @@
+<?php
+
+namespace FluentCart\App\Models;
+
+use FluentCart\App\Modules\MultiCurrency\Services\StorefrontPrice;
+use FluentCart\Api\ModuleSettings;
+use FluentCart\App\App;
+use FluentCart\App\Helpers\AttributeHelper;
+use FluentCart\App\Helpers\Helper;
+use FluentCart\App\Helpers\Status;
+use FluentCart\App\Models\Concerns\CanSearch;
+use FluentCart\App\Models\Concerns\CanUpdateBatch;
+use FluentCart\App\Models\Relations\BundleChildrenRelation;
+use FluentCart\App\Models\WpModels\PostMeta;
+use FluentCart\App\Services\PlanUpgradeService;
+use FluentCart\App\Services\URL;
+use FluentCart\Framework\Database\Orm\Builder;
+use FluentCart\Framework\Support\Arr;
+
+/**
+ *  Product Details Model - DB Model for Product Details
+ *
+ *  Database Model
+ *
+ *
+ * @package FluentCart\App\Models
+ *
+ * @version 1.0.0
+ */
+class ProductVariation extends Model
+{
+
+    use CanSearch, CanUpdateBatch;
+
+    protected $table = 'fct_product_variations';
+
+    protected $fillable = [
+        'post_id',
+        'media_id',
+        'serial_index',
+        'sold_individually',
+        'variation_title',
+        'variation_identifier',
+        'sku',
+        'manage_stock',
+        'payment_type',
+        'stock_status',
+        'backorders',
+        'total_stock',
+        'available',
+        'committed',
+        'on_hold',
+        'fulfillment_type',
+        'item_status',
+        'manage_cost',
+        'item_price',
+        'item_cost',
+        'compare_price',
+        'other_info',
+        'downloadable',
+        'shipping_class'
+    ];
+
+
+    /**
+     * The attributes that should be cast.
+     *
+     * @var array
+     */
+    protected $casts = [
+        'post_id'           => 'integer',
+        'media_id'          => 'integer',
+        'item_cost'         => 'double',
+        'item_price'        => 'double',
+        'compare_price'     => 'double',
+        'backorders'        => 'integer',
+        'total_stock'       => 'integer',
+        'available'         => 'integer',
+        'committed'         => 'integer',
+        'on_hold'           => 'integer',
+        'sold_individually' => 'integer',
+        'serial_index'      => 'integer',
+        'other_info'        => 'array',
+    ];
+
+    protected $appends = ['thumbnail'];
+
+    // Only feeds the thumbnail fallback; keep it out of API responses.
+    protected $hidden = ['simpleProductGallery'];
+
+
+    public function getOtherInfoAttribute($value)
+    {
+        $value = !empty($value) ? json_decode($value, true) : [];
+
+        if($this->payment_type === 'subscription'){
+            $isInstallment = (Arr::get($value, 'installment', 'no') === 'yes' && App::isProActive())?
+                'yes':'no';
+            $value['payment_type'] = 'subscription';
+            $value['installment'] = $isInstallment;
+            $value['repeat_interval'] = Arr::get($value, 'repeat_interval', 'yearly');
+            $value['times'] = Arr::get($value, 'times', 0);
+            $value['trial_days'] = Arr::get($value, 'trial_days', 0);
+            $value['manage_setup_fee'] = Arr::get($value, 'manage_setup_fee', 'no');
+        }
+        return $value;
+    }
+
+
+
+    protected static function booted()
+    {
+        static::retrieved(function ($product) {
+            $product->append('formatted_total');
+        });
+    }
+
+    protected function getFormattedTotalAttribute()
+    {
+        // In the storefront visitor's currency; the base currency elsewhere
+        return StorefrontPrice::format($this->item_price);
+    }
+
+
+    /**
+     * One2One: Product Variation belongs to one Product
+     *
+     * @return \FluentCart\Framework\Database\Orm\Relations\BelongsTo
+     */
+    public function product(): \FluentCart\Framework\Database\Orm\Relations\BelongsTo
+    {
+        return $this->belongsTo(Product::class, 'post_id', 'ID');
+    }
+
+    public function shippingClass(): \FluentCart\Framework\Database\Orm\Relations\BelongsTo
+    {
+        return $this->belongsTo(ShippingClass::class, 'shipping_class', 'id');
+    }
+
+    /**
+     * Labeled attribute combination for this variation, e.g. "Color: Red | Size: XS".
+     *
+     * Uses the batched `variation_display_title` when
+     * AttributeHelper::attachVariationDisplayTitles() has already resolved it,
+     * and otherwise resolves on demand — so callers get a correct value either
+     * way, and a correctly batched caller costs no extra queries.
+     *
+     * @return string Falls back to the stored variation title.
+     */
+    public function getVariationLabel(): string
+    {
+        $resolved = (string) ($this->variation_display_title ?? '');
+
+        if ($resolved !== '') {
+            return $resolved;
+        }
+
+        $variationType = $this->product_detail ? $this->product_detail->variation_type : '';
+
+        $label = AttributeHelper::getDisplayAttributesString(
+            AttributeHelper::getProductItemAttributes($this->id, $this->post_id),
+            [
+                'title'          => $this->variation_title,
+                'variation_type' => $variationType,
+                'other_info'     => ['variation_type' => $variationType],
+            ],
+            'order_item'
+        );
+
+        return $label !== '' ? $label : (string) $this->variation_title;
+    }
+
+    /**
+     * Full display title for this variation: "<product> - <attribute combination>".
+     *
+     * The catalogue-side counterpart to OrderItem::getDisplayTitle(), which
+     * composes the same shape from a frozen line item. Product feeds, plan
+     * names and CLI output all need the product name alongside the variation,
+     * and each was concatenating it themselves.
+     *
+     * @return string
+     */
+    public function getDisplayTitle(): string
+    {
+        $label        = $this->getVariationLabel();
+        $productTitle = $this->product ? (string) $this->product->post_title : '';
+
+        if ($productTitle === '' || $productTitle === $label) {
+            return $label;
+        }
+
+        if ($label === '') {
+            return $productTitle;
+        }
+
+        return $productTitle . ' - ' . $label;
+    }
+
+    /**
+     * One2One: Product Variation belongs to one Product detail
+     *
+     * @return \FluentCart\Framework\Database\Orm\Relations\BelongsTo
+     */
+    public function product_detail()
+    {
+        return $this->belongsTo(ProductDetail::class, 'post_id', 'post_id');
+    }
+
+    public function media()
+    {
+        return $this->hasOne(ProductMeta::class, 'object_id', 'id')->select('id', 'object_id', 'meta_value')->where('meta_key', 'product_thumbnail');
+    }
+
+    /**
+     * Product gallery meta, only for a simple product. Eager-load it with the
+     * variants of a list so the thumbnail fallback costs no query per row.
+     */
+    public function simpleProductGallery()
+    {
+        return $this->hasOne(PostMeta::class, 'post_id', 'post_id')
+            ->where('postmeta.meta_key', 'fluent-products-gallery-image')
+            ->whereIn('postmeta.post_id', function ($query) {
+                $query->select('post_id')
+                    ->from('fct_product_details')
+                    ->where('variation_type', Helper::PRODUCT_TYPE_SIMPLE);
+            });
+    }
+
+    public function product_downloads(): \FluentCart\Framework\Database\Orm\Relations\HasMany
+    {
+        return $this
+            ->hasMany(ProductDownload::class, 'post_id', 'post_id')
+            ->where('product_variation_id', 'like', '%' . $this->id . '%')
+            ->orWhereNull('product_variation_id')
+            ->orWhere('product_variation_id', '[]');
+
+    }
+
+    public function attrRelations(): \FluentCart\Framework\Database\Orm\Relations\HasMany
+    {
+        return $this->hasMany(AttributeRelation::class, 'object_id', 'id');
+    }
+
+    public function order_items()
+    {
+        return $this->hasMany(OrderItem::class, 'object_id', 'id');
+    }
+
+    public function downloadable_files()
+    {
+        return $this->hasMany(ProductDownload::class, 'product_variation_id', 'id');
+    }
+
+    public function upgrade_paths(): \FluentCart\Framework\Database\Orm\Relations\HasMany
+    {
+        return $this->hasMany(Meta::class, 'object_id', 'id')
+            ->where('object_type', PlanUpgradeService::$metaType)
+            ->where('meta_key', PlanUpgradeService::$metaKey);
+    }
+
+    public function attrMap()
+    {
+        return $this->hasMany(AttributeRelation::class, 'object_id', 'id');
+    }
+
+    public function getThumbnailAttribute()
+    {
+        if (!empty($this->media) && is_array($this->media->meta_value) && !empty($this->media->meta_value[0]['url'])) {
+            return $this->media->meta_value[0]['url'];
+        }
+
+        // A simple product keeps its image in the product gallery. Variable products
+        // stay null: variant swatches read null as "no image of its own".
+        $gallery = $this->simpleProductGallery;
+        if (!$gallery || !is_array($gallery->meta_value)) {
+            return null;
+        }
+
+        return Arr::get($gallery->meta_value, '0.url') ?: null;
+    }
+
+    /**
+     * @deprecated Unused and broken: looks the class id up as a shipping method id
+     *             and returns a fresh query. Kept for back-compat; read
+     *             ProductDetail other_info.shipping_class instead.
+     */
+    public function scopeGetWithShippingClass(Builder $query)
+    {
+        $variations = $query->get();
+
+        $shippingMethodIds = $variations->pluck('other_info.shipping_class')->filter(function ($item) {
+            return !empty($item);
+        })->toArray();
+
+
+        $shippingMethods = ShippingMethod::query()->whereIn('id', $shippingMethodIds)->get()->keyBy('id');
+
+        $variations->map(function ($variation) use ($shippingMethods) {
+            $shippingClassId = Arr::get($variation, 'other_info.shipping_class');
+            if (!$shippingClassId) {
+                return $variation;
+            }
+            $method = $shippingMethods->get($shippingClassId);
+
+            if (!$method) {
+                return $variation;
+            }
+            $variation->attributes['shipping_method'] = $method;
+            return $variation;
+        });
+
+
+        return $query->get();
+    }
+
+
+    public static function boot()
+    {
+        parent::boot();
+        static::deleting(function ($model) {
+            \FluentCart\Api\Meta::deleteVariationMedia($model->id);
+            $model->attrMap()->delete();
+        });
+    }
+
+    /**
+     * Check if the product variation can be purchased
+     *
+     * @param int $quantity
+     * @return bool|\WP_Error
+     */
+    public function canPurchase($quantity = 1)
+    {
+        // Intended: private products are unlisted but buyable by direct link,
+        // with no capability check. Drafts and other statuses are refused.
+        if ($this->item_status !== 'active' || !in_array($this->product->post_status, ['publish', 'private'])) {
+            return new \WP_Error('unpublished', __('This product is not available for purchase.', 'fluent-cart'));
+        }
+
+        if ($this->payment_type === 'subscription' && $quantity > 1) {
+            return new \WP_Error('invalid_subscription_quantity', __('You cannot purchase more than one subscription at a time.', 'fluent-cart'));
+        }
+
+        $productDetail = $this->product_detail;
+        if (!$productDetail) {
+            return new \WP_Error('unpublished', __('This product is not available for purchase', 'fluent-cart'));
+        }
+
+        if (ModuleSettings::isActive('stock_management')) {
+            if (($productDetail->manage_stock && $this->manage_stock) && $quantity > $this->available) {
+                return new \WP_Error('insufficient_stock', __('Sorry, this product is currently out of stock.', 'fluent-cart'));
+            }
+        }
+
+
+        if ($this->product->isBundleProduct() && !App::isProActive()) {
+            return new \WP_Error('invalid_bundle_product', __('Sorry, this product is not available for purchase.', 'fluent-cart'));
+
+        }
+
+        $bundleCheck = apply_filters('fluent_cart/variation/can_purchase_bundle', null, [
+            'variation' => $this,
+            'quantity'  => (int)$quantity
+        ]);
+        if (is_wp_error($bundleCheck)) {
+            return $bundleCheck;
+        } elseif ($bundleCheck === false) {
+            return new \WP_Error('insufficient_stock', __('Sorry, this product is currently out of stock.', 'fluent-cart'));
+        }
+
+        return true;
+    }
+
+    public function getSubscriptionTermsText($withComparePrice = false)
+    {
+        if ($this->payment_type !== 'subscription') {
+            return '';
+        }
+
+        $otherInfo = $this->other_info;
+
+        $formattedData = [
+            'trial_days'       => Arr::get($otherInfo, 'trial_days', 0),
+            'interval'         => Arr::get($otherInfo, 'repeat_interval', 'yearly'),
+            'times'            => Arr::get($otherInfo, 'times', 0), // 0 means infinite
+            'signup_fee'       => Arr::get($otherInfo, 'signup_fee', 0) ? StorefrontPrice::format(Arr::get($otherInfo, 'signup_fee', 0)) : 0,
+            'signup_fee_label' => Arr::get($otherInfo, 'signup_fee_name', ''),
+            'price'            => StorefrontPrice::format($this->item_price),
+            'compare_price'    => ($withComparePrice && $this->compare_price > $this->item_price) ? StorefrontPrice::format($this->compare_price) : 0,
+        ];
+
+        return Helper::getSubscriptionTermText($formattedData);
+    }
+
+    public function getPurchaseUrl()
+    {
+        return site_url('?fluent-cart=instant_checkout&item_id=' . $this->id . '&quantity=1');
+    }
+
+    public function soldIndividually()
+    {
+        if ($this->product) {
+            return $this->product->soldIndividually();
+        }
+        return false;
+    }
+
+    /**
+     * @param array|null $bundleChildren Bundle child rows keyed by id, from
+     *   loadBundleChildren(), when the caller has several bundle variations
+     *   to ask about and wants one query for all their children instead of
+     *   one per variation. Null queries this variation's own children.
+     */
+    public function isStock($bundleChildren = null): bool
+    {
+        // Check if variation is active
+        if ($this->item_status !== 'active') {
+            return false;
+        }
+
+        // Check if this is a bundle product variation
+        $isBundleProduct = $this->product && $this->product->isBundleProduct();
+
+        // If stock management is disabled for this variation
+        if (!$this->manage_stock) {
+            // For bundle products, still check child items
+            if ($isBundleProduct) {
+                return $this->isBundleChildrenInStock($bundleChildren);
+            }
+            // For regular products without stock management, check status
+            return $this->stock_status === Helper::IN_STOCK;
+        }
+
+        // Stock management is enabled - check availability and status
+        $hasStock = ($this->available > 0 && $this->stock_status === Helper::IN_STOCK);
+
+        // For non-bundle products, return stock status
+        if (!$isBundleProduct) {
+            return $hasStock;
+        }
+
+        // For bundle products, parent must be in stock AND all children must be in stock
+        if (!$hasStock) {
+            return false;
+        }
+
+        return $this->isBundleChildrenInStock($bundleChildren);
+    }
+
+    /**
+     * The bundle children of several variations in one query, keyed by id,
+     * for isStock($bundleChildren). Only the columns the stock check reads.
+     *
+     * @param iterable $variations
+     * @return array<int, static>
+     */
+    public static function loadBundleChildren($variations): array
+    {
+        $childIds = [];
+        foreach ($variations as $variation) {
+            $ids = Arr::get($variation->other_info, 'bundle_child_ids', []);
+            if (is_array($ids)) {
+                foreach ($ids as $id) {
+                    $childIds[(int) $id] = true;
+                }
+            }
+        }
+        unset($childIds[0]);
+
+        if (!$childIds) {
+            return [];
+        }
+
+        $children = static::query()
+            ->whereIn('id', array_keys($childIds))
+            ->get(['id', 'manage_stock', 'available', 'stock_status', 'item_status', 'post_id', 'other_info']);
+
+        $byId = [];
+        foreach ($children as $child) {
+            $byId[(int) $child->id] = $child;
+        }
+
+        return $byId;
+    }
+
+    /**
+     * Check if all bundle children are in stock
+     *
+     * @return bool
+     */
+    protected function isBundleChildrenInStock($preloadedChildren = null): bool
+    {
+        $childIds = Arr::get($this->other_info, 'bundle_child_ids', []);
+
+        // No bundle children, consider as in stock
+        if (empty($childIds) || !is_array($childIds)) {
+            return true;
+        }
+
+        $childIds = array_values(array_unique(array_map('intval', $childIds)));
+
+        if (is_array($preloadedChildren)) {
+            // From loadBundleChildren().
+            $children = [];
+            foreach ($childIds as $childId) {
+                if (isset($preloadedChildren[$childId])) {
+                    $children[] = $preloadedChildren[$childId];
+                }
+            }
+        } else {
+            // Get all bundle children variations
+            $children = static::query()
+                ->whereIn('id', $childIds)
+                ->get(['id', 'manage_stock', 'available', 'stock_status', 'item_status', 'post_id', 'other_info'])
+                ->all();
+        }
+
+        // A child the bundle names but that no longer exists cannot be
+        // supplied, so the bundle is not in stock. Same rule on both paths:
+        // a row missing from the map and a row missing from the query are
+        // the same deleted variation.
+        if (count($children) !== count($childIds)) {
+            return false;
+        }
+
+        // Check each child
+        foreach ($children as $child) {
+            // Child must be active
+            if ($child->item_status !== 'active') {
+                return false;
+            }
+
+            // Only check stock for children that manage inventory.
+            // Children without stock management (e.g. digital products) are always considered in stock.
+            if ((int)$child->manage_stock === 1) {
+                if ((int)$child->available <= 0 || $child->stock_status !== Helper::IN_STOCK) {
+                    return false;
+                }
+            }
+
+            // Nested bundle check commented out: bundle_child_ids live on the bundle's own variation,
+            // not on the leaf child variation referenced here. Each bundle's isStock() handles its own
+            // children independently, so this recursive call is redundant and causes N+1 queries.
+            // if ($child->product && $child->product->isBundleProduct()) {
+            //     $nestedChildIds = Arr::get($child->other_info, 'bundle_child_ids', []);
+            //     if (!empty($nestedChildIds)) {
+            //         if (!$child->isBundleChildrenInStock()) {
+            //             return false;
+            //         }
+            //     }
+            // }
+        }
+
+        return true;
+    }
+
+    public function bundleChildren(): BundleChildrenRelation
+    {
+        return new BundleChildrenRelation(
+            $this->newQuery(),
+            $this,
+            'other_info',           // JSON column name
+            'bundle_child_ids'      // JSON key name
+        );
+    }
+}

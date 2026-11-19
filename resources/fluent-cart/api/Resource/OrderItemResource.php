@@ -1,0 +1,429 @@
+<?php
+
+namespace FluentCart\Api\Resource;
+
+use FluentCart\App\App;
+use FluentCart\App\Helpers\AttributeHelper;
+use FluentCart\App\Helpers\Helper;
+use FluentCart\App\Helpers\Status;
+use FluentCart\App\Models\OrderItem;
+use FluentCart\App\Models\ProductVariation;
+use FluentCart\App\Modules\MultiCurrency\Services\CurrencySnapshot;
+use FluentCart\App\Modules\MultiCurrency\Services\PriceConverter;
+use FluentCart\Framework\Database\Orm\Builder;
+use FluentCart\Framework\Support\Arr;
+use FluentCart\Framework\Support\Collection;
+use FluentCart\Framework\Support\DateTime;
+
+class OrderItemResource extends BaseResourceApi
+{
+
+    public static function getQuery(): Builder
+    {
+        return OrderItem::query();
+    }
+
+    public static function get(array $params = [])
+    {
+
+    }
+
+    /**
+     * Find and retrieve order items based on the order ID.
+     *
+     * @param int $id Required. The ID of the order to find and retrieve.
+     * @param array $params Optional. Additional parameters for finding order items.
+     *        [
+     *             // Include optional parameters, if any.
+     *        ]
+     *
+     */
+    public static function find($id, $params = [])
+    {
+        return static::getQuery()->where('order_id', $id)->get()->toArray();
+    }
+
+    /**
+     * Create order items with the provided data.
+     *
+     * This function creates order items based on the provided data.
+     * It also dispatches events related to order creation and stock changes.
+     *
+     * @param array $data Required. Array containing the necessary parameters
+     *        $data    =>   (array) Required. Array of order item details.
+     *            [
+     *                    'order_id'       => (int) The ID of the order to which the item belongs.
+     *                    'post_id'      => (int) The product ID associated with the order item.
+     *                    'object_id'   => (int) The variation ID of the order item.
+     *                    'thumbnail'      => (string) The URL of the thumbnail of order item.
+     *                    'price'     => (float) The price of the item.
+     *                    'title'      => (string) The name of the item.
+     *                    'quantity'       => (int) The quantity of the item.
+     *                    'fulfillment_type'           => (string) Type (e.g., 'physical', 'digital').
+     *                    'stockStatus'    => (string) (e.g., 'in-stock'|'out-of-stock').
+     *                    'stock'          => (int) The current stock quantity.
+     *                    'tax_amount'     => (float) The tax amount for the item.
+     *                    'discount_total' => (float) The total discount amount for the item.
+     *                    'total'     => (float) The total amount for the item.
+     *                    'line_total'     => (float) The total amount for the line
+     *             ]
+     * @param array $params Optional. Additional parameters for order item creation.
+     *        [
+     *             // Include optional parameters, if any.
+     *        ]
+     *
+     */
+    public static function create($data, $params = [])
+    {
+        $isCreated = static::getQuery()->insert($data);
+
+        if ($isCreated) {
+            return static::makeSuccessResponse(
+                $isCreated,
+                __('Order items created.', 'fluent-cart')
+            );
+        }
+
+        return static::makeErrorResponse([
+            ['code' => 400, 'message' => __('Order items failed to create!', 'fluent-cart')]
+        ]);
+    }
+
+    /**
+     * Update order items with the provided data.
+     *
+     * This function creates order items based on the provided data.
+     * It also dispatches events related to order creation and stock changes.
+     *
+     * @param array $data Required. Array containing the necessary parameters
+     *        $data    =>   (array) Required. Array of order item details.
+     *            [
+     *                    'id'             => (int) The id for the order item.
+     *                    'order_id'       => (int) The ID of the order to which the item belongs.
+     *                    'post_id'      => (int) The product ID associated with the order item.
+     *                    'object_id'   => (int) The variation ID of the order item.
+     *                    'thumbnail'      => (string) The URL of the thumbnail of order item.
+     *                    'price'     => (float) The price of the item.
+     *                    'title'      => (string) The name of the item.
+     *                    'quantity'       => (int) The quantity of the item.
+     *                    'fulfillment_type'           => (string) Type (e.g., 'physical', 'digital').
+     *                    'stockStatus'    => (string) (e.g., 'in-stock'|'out-of-stock').
+     *                    'stock'          => (int) The current stock quantity.
+     *                    'tax_amount'     => (float) The tax amount for the item.
+     *                    'discount_total' => (float) The total discount amount for the item.
+     *                    'total'     => (float) The total amount for the item.
+     *                    'line_total'     => (float) The total amount for the line
+     *             ]
+     * @param int $id Required. The id of the order item to update.
+     * @param array $params Optional. Additional parameters for order item creation.
+     *        [
+     *             // Include optional parameters, if any.
+     *        ]
+     *
+     */
+    public static function update($data, $id, $params = [])
+    {
+        $isUpdate = static::getQuery()->batchUpdate($data);
+
+        if ($isUpdate) {
+            return static::makeSuccessResponse(
+                $isUpdate,
+                __('Order items updated.', 'fluent-cart')
+            );
+        }
+
+        return static::makeErrorResponse([
+            ['code' => 400, 'message' => __('Order items failed to update!', 'fluent-cart')]
+        ]);
+    }
+
+    public static function delete($id, $params = [])
+    {
+
+    }
+
+    /**
+     * The order's frozen currency snapshot as a pricing quote, when the order
+     * is in a currency other than the base with a known rate; null otherwise
+     * (base-currency orders, and legacy orders whose rate was never known).
+     *
+     * @param \FluentCart\App\Models\Order|mixed $order
+     */
+    private static function orderCurrencyQuote($order): ?array
+    {
+        if (!$order instanceof \FluentCart\App\Models\Order) {
+            return null;
+        }
+
+        $snapshot = CurrencySnapshot::fromOrder($order);
+        if (!CurrencySnapshot::hasTrustedRate($snapshot) || PriceConverter::isBaseQuote($snapshot)) {
+            return null;
+        }
+
+        return $snapshot;
+    }
+
+    /**
+     * New catalog lines on an order in another currency are priced at the
+     * order's frozen rate on save. The edit screen must have shown that price.
+     */
+    public static function newItemPricesMatch($order, array $items): bool
+    {
+        $orderQuote = static::orderCurrencyQuote($order);
+        if (!$orderQuote) {
+            return true;
+        }
+
+        $newItems = [];
+        foreach ($items as $item) {
+            $productId = Arr::get($item, 'post_id');
+            $variationId = Arr::get($item, 'object_id');
+            if (!isset($productId, $variationId) || Arr::get($item, 'other_info.is_custom', false)) {
+                continue;
+            }
+
+            $isExist = $order->order_items
+                ->where('post_id', $productId)
+                ->where('object_id', $variationId)
+                ->first();
+            if (!$isExist) {
+                $newItems[] = $item;
+            }
+        }
+        if (!$newItems) {
+            return true;
+        }
+
+        $variations = ProductVariation::query()
+            ->whereIn('id', array_values(array_unique(array_map(function ($item) {
+                return (int) Arr::get($item, 'object_id');
+            }, $newItems))))
+            ->get()
+            ->keyBy('id');
+
+        foreach ($newItems as $item) {
+            $variation = $variations->get((int) Arr::get($item, 'object_id'));
+            if (!$variation) {
+                continue;
+            }
+
+            if (Helper::roundCent(Arr::get($item, 'unit_price', 0)) !== PriceConverter::toPrice($variation->item_price, $orderQuote)) {
+                return false;
+            }
+
+            $signupFee = Arr::get($variation->other_info, 'signup_fee');
+            if (!empty($signupFee) && Helper::roundCent(Arr::get($item, 'other_info.signup_fee', 0)) !== PriceConverter::toPrice($signupFee, $orderQuote)) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /**
+     * Create or Update order items with the provided data.
+     *
+     * This function creates or updates order items based on the provided data.
+     *
+     * @param array $data Required. Array containing the necessary parameters
+     *        $order    =>   (array) Required. Array of order details.
+     *            [
+     *               'id'               => (int) The id for the order.
+     *               'status'           => (string) The current status of the order
+     *               'parent_id'        => (int) The parent order ID, if applicable.
+     *               'invoice_no'     => (string) The order number assigned to the order.
+     *               'receipt_number'     => (int) The sequential order number for using in invoice
+     *               'fulfillment_type' => (string)  (e.g., 'virtual', 'physical', etc.).
+     *               'type'             => (string) Type (e.g., 'sale', 'refund', etc.).
+     *               'customer_id'      => (int) The ID of the customer associated with the order.
+     *               'payment_method'   => (string) The payment method used for the order.
+     *               'payment_method_title'   => (string) The title of the payment method.
+     *               'currency'         => (string) The currency used for the order (e.g., 'BDT').
+     *               'subtotal'         => (float) The subtotal amount of the order.
+     *               'discount_tax'     => (float) The tax amount on discounts.
+     *               'discount_total'   => (float) The total discount amount for the order.
+     *               'shipping_tax'     => (float) The tax amount on shipping.
+     *               'shipping_total'   => (float) The total shipping amount for the order.
+     *               'tax_total'        => (float) The total tax amount for the order.
+     *               'total_amount'     => (float) The total amount for the order.
+     *               'total_paid'       => (float) The total amount paid for the order.
+     *               'rate'             => (float) The exchange rate used for currency conversion.
+     *               'note'             => (string) Additional notes or comments for the order.
+     *               'ip_address'       => (string) The IP address associated with the order.
+     *               'completed_at'     => (string|null) date-time order completed|null
+     *               'refunded_at'      => (string|null) date-time the order was refunded|null
+     *               'uuid'             => (string) The id for the order.
+     *               'created_at'       => (string) The date and time the order was created.
+     *               'updated_at'       => (string) The date and time the order was last updated.
+     *           ]
+     * @param int $id Required. The id of the order to create or update.
+     * @param array $params Required. Additional parameters for order item creation|update.
+     *        $params    =>   (array) Required. Array of order item details.
+     *           [
+     *               'id'             => (int) The id for the order item|null if not.
+     *               'order_id'       => (int) The ID of the order to which the item belongs.
+     *               'post_id'      => (int) The product ID associated with the order item.
+     *               'object_id'   => (int) The variation ID of the order item.
+     *               'thumbnail'      => (string) The URL of the thumbnail of order item.
+     *               'unit_price'     => (float) The price of the item.
+     *               'title'      => (string) The name of the item.
+     *               'quantity'       => (int) The quantity of the item.
+     *               'fulfillment_type'           => (string) Type (e.g., 'physical', 'digital').
+     *               'stockStatus'    => (string) (e.g., 'in-stock'|'out-of-stock').
+     *               'stock'          => (int) The current stock quantity.
+     *               'tax_amount'     => (float) The tax amount for the item.
+     *               'discount_total' => (float) The total discount amount for the item.
+     *               'total'     => (float) The total amount for the item.
+     *               'line_total'     => (float) The total amount for the line
+     *           ]
+     *
+     */
+    public static function updateOrInsertOrderItems($order, $id, $params = [], $couponCalculation = [])
+    {
+        if (empty($params) || !is_array($params)) {
+            return static::makeErrorResponse([
+                ['code' => 403, 'message' => __('No items given.', 'fluent-cart')]
+            ]);
+        }
+
+        $newItems = [];
+        $existingItems = [];
+
+        $variationIds = (new Collection($params))->pluck('object_id')->toArray();
+
+        $orderItems = static::getQuery()
+            ->where('order_id', $id)
+            ->whereIn('object_id', $variationIds)
+            ->get();
+
+        foreach ($params as $idx => &$item) {
+            $item['order_id'] = $id;
+            $productId = Arr::get($item, 'post_id');
+            $variationId = Arr::get($item, 'object_id', null);
+            $isCustom = Arr::get($item, 'other_info.is_custom', false);
+            
+            if (isset($productId) && isset($variationId) && !$isCustom) {
+
+                $orderItem = $orderItems->where('post_id', $productId)
+                    ->where('object_id', $variationId)->first();
+
+                $isExist = !empty($orderItem);
+
+                $itemData = Arr::only($item, ['id', 'title', 'post_id', 'object_id', 'post_title', 'quantity', 'unit_price', 'cost', 'tax_amount', 'discount_total', 'line_total']);
+                $itemData['subtotal'] = Arr::get($item, 'quantity', 0) * Arr::get($item, 'unit_price', 0);
+                $itemData['line_total'] = $itemData['subtotal'] - Arr::get($item, 'discount_total', 0);
+                $fulfillment_type = Arr::get($item, 'fulfillment_type', 'physical');
+
+                if (empty($isExist)) {
+                    unset($itemData['id']);
+
+                    // Snapshot the variant's attribute map + variation type into
+                    // other_info so items added on order-edit carry the same data as
+                    // the create path (AdminOrderProcessor), not just what the picker sent.
+                    $otherInfo = Arr::get($item, 'other_info', []);
+                    if (!is_array($otherInfo)) {
+                        $otherInfo = [];
+                    }
+
+                    // An order in another currency prices the line at the order's own
+                    // frozen rate and pricing rules, from the stored base price
+                    // (dev-docs/multi-currency/06-orders-subscriptions.md).
+                    $orderQuote = static::orderCurrencyQuote($order);
+                    if ($orderQuote) {
+                        $baseVariation = ProductVariation::query()->find($variationId);
+                        if ($baseVariation) {
+                            $itemData['unit_price'] = PriceConverter::toPrice($baseVariation->item_price, $orderQuote);
+                            $itemData['subtotal'] = Arr::get($item, 'quantity', 0) * $itemData['unit_price'];
+                            $itemData['line_total'] = $itemData['subtotal'] - Arr::get($item, 'discount_total', 0);
+                            $signupFee = Arr::get($baseVariation->other_info, 'signup_fee');
+                            if (!empty($signupFee)) {
+                                $otherInfo['signup_fee'] = PriceConverter::toPrice($signupFee, $orderQuote);
+                            }
+                        }
+                    }
+                    if (!array_key_exists('item_attributes', $otherInfo)) {
+                        $otherInfo['item_attributes'] = AttributeHelper::getProductItemAttributes($variationId, $productId);
+                    }
+                    if (empty($otherInfo['variation_type'])) {
+                        // Resolve server-side from the variation (same as the create
+                        // path) — admin orders don't go through the cart, so the snapshot
+                        // is the server's responsibility, not the request's.
+                        $variation = ProductVariation::query()->with('product_detail')->find($variationId);
+                        $otherInfo['variation_type'] = ($variation && $variation->product_detail) ? (string) $variation->product_detail->variation_type : '';
+                    }
+
+                    $item = wp_parse_args([
+                        'order_id' => $id,
+                        'cart_index' => $idx + 1,
+                        'fulfillment_type' => $fulfillment_type,
+                        'other_info' => json_encode($otherInfo),
+                        'payment_type' => Arr::get($item, 'payment_type', Arr::get($item, 'other_info.payment_type', '')),
+                        'shipping_charge' => Arr::get($item, 'shipping_charge', 0),
+                        'created_at' => DateTime::now(),
+                        'updated_at' => DateTime::now(),
+                        'fulfilled_quantity' => $fulfillment_type === 'physical' ? 0 : Arr::get($item, 'quantity', 0)
+                    ], $itemData);
+                    $newItems[] = $item;
+                } else {
+                    $existingData = Arr::only($itemData, ['id', 'quantity', 'unit_price', 'cost', 'subtotal', 'tax_amount', 'discount_total', 'line_total', 'shipping_charge']) + ['updated_at' => DateTime::now()];
+                    // Shipments own a physical item's fulfilled_quantity; never take it from the request.
+                    if ($orderItem->fulfillment_type !== Status::FULFILLMENT_TYPE_PHYSICAL) {
+                        $existingData['fulfilled_quantity'] = $fulfillment_type === 'physical' ? Arr::get($item, 'fulfilled_quantity', 0) : Arr::get($item, 'quantity', 0);
+                    }
+                    $incomingLineMeta = Arr::get($item, 'line_meta');
+                    if (is_array($incomingLineMeta) && array_key_exists('coupon_discount', $incomingLineMeta)) {
+                        $incomingLineMeta['coupon_discount'] = (int) $incomingLineMeta['coupon_discount'];
+                        $existingData['line_meta'] = json_encode($incomingLineMeta);
+                    }
+                    $existingItems[] = $existingData;
+                }
+            }
+            else if(isset($productId) && isset($variationId) && $isCustom){
+                $oldItem = $orderItems->firstWhere('object_id', $variationId);
+                $filteredItem = (array) apply_filters('fluent_cart/order/custom_item_changed',
+                    $oldItem,
+                    $item
+                );
+
+                $filteredData = Arr::only($filteredItem, ['id', 'quantity', 'unit_price', 'cost', 'subtotal', 'tax_amount', 'discount_total', 'line_total', 'shipping_charge']
+                );
+
+                if (!$oldItem || $oldItem->fulfillment_type !== Status::FULFILLMENT_TYPE_PHYSICAL) {
+                    $filteredData['fulfilled_quantity'] = $fulfillment_type === 'physical'
+                        ? Arr::get($item, 'fulfilled_quantity', 0)
+                        : Arr::get($item, 'quantity', 0);
+                }
+
+                $existingItems[] = $filteredData;
+            }
+        }
+
+        // if any item is adjustment, then only add the adjustment item
+        $adjustmentItem = array_filter($newItems, function ($item) {
+            return Arr::get($item, 'payment_type') === 'adjustment';
+        });
+
+        if (count($adjustmentItem) > 0) {
+            $newItems = $adjustmentItem[0];
+        }
+
+        if (count($newItems) > 0) {
+            OrderItemResource::create($newItems, $order);
+        }
+
+        if (count($existingItems) > 0) {
+            OrderItemResource::update($existingItems, $order);
+        }
+
+        return static::makeSuccessResponse(
+            '',
+            __('Order items updated.', 'fluent-cart')
+        );
+    }
+
+    public static function bulkDeleteByOrderIds($ids, $params = [])
+    {
+        return static::getQuery()->whereIn('order_id', $ids)->delete();
+    }
+
+}

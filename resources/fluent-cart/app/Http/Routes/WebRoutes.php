@@ -1,0 +1,419 @@
+<?php
+
+namespace FluentCart\App\Http\Routes;
+
+use FluentCart\Api\Resource\FrontendResource\CartResource;
+use FluentCart\Api\StoreSettings;
+use FluentCart\App\App;
+
+use FluentCart\App\Helpers\CartHelper;
+use FluentCart\App\Helpers\Helper;
+use FluentCart\App\Hooks\Handlers\ShortCodes\Checkout\CheckoutPageHandler;
+use FluentCart\App\Hooks\Handlers\ShortCodes\ReceiptHandler;
+use FluentCart\App\Http\Controllers\WebController\FileDownloader;
+use FluentCart\App\Models\Cart;
+use FluentCart\App\Models\ProductVariation;
+use FluentCart\App\Modules\PaymentMethods\PayPalGateway\API\PayPalPartnerRenderer;
+use FluentCart\App\Modules\Templating\AssetLoader;
+use FluentCart\App\Services\FrontendView;
+use FluentCart\App\Services\PrintService;
+use FluentCart\App\Services\Renderer\CartRenderer;
+use FluentCart\App\Services\TemplateService;
+use FluentCart\App\Services\URL;
+use FluentCart\App\Vite;
+use FluentCart\Framework\Support\Arr;
+use FluentCart\App\Services\Renderer\CheckoutRenderer;
+use FluentCart\App\Services\Renderer\ModalCheckoutRenderer;
+use FluentCart\App\Services\Renderer\OrderReviewRenderer;
+
+class WebRoutes
+{
+    public static function register()
+    {
+
+        // Late on init, deliberately. These routes do not merely register — they
+        // TAKE OVER the request, render a full page and die(). At the default
+        // priority this callback is queued at plugin-include time, so it runs
+        // before anything that registers on init from `fluentcart_loaded` (every
+        // add-on, including FluentCart Pro). A route that renders and dies before
+        // those listeners exist silently drops whatever they would have rendered
+        // — which is why the saved-payment-method picker and the save-my-card
+        // consent box appeared on the checkout page but never in modal checkout.
+        add_action('init', function () {
+            self::registerRoutes();
+        }, 99);
+    }
+
+    public static function renderModalCheckout() {
+        add_action('wp_footer', function () {
+            if (!AssetLoader::isFrontendAssetsMarked() && !AssetLoader::isFluentCartContext()) {
+                return;
+            }
+
+            AssetLoader::loadModalCheckoutAssets();
+
+            if (
+                isset($_SERVER['HTTP_SEC_FETCH_DEST']) &&
+                $_SERVER['HTTP_SEC_FETCH_DEST'] === 'iframe'
+            ) {
+                return;
+            }
+
+            $cart = CartHelper::getCart();
+
+            if (!$cart) {
+                $cart = new Cart();
+            }
+
+            (new ModalCheckoutRenderer($cart))->render();
+        });
+    }
+
+    public static function registerRoutes()
+    {
+        // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+       $page = sanitize_text_field(wp_unslash($_REQUEST['fluent-cart'] ?? ''));
+
+        if (empty($page)) {
+            return;
+        }
+
+        $page = sanitize_text_field($page);
+
+        if (!$page) {
+            return;
+        }
+
+        if ($page === 'instant_checkout') {
+            $requestData = App::request()->all();
+            $variationId = sanitize_text_field(App::request()->get('item_id'));
+            $quantity = App::request()->get('quantity', 1);
+            // Raw request flag; actual validation and normalization
+            // happens in CartResource.
+            $isCustom = (bool)Arr::get($requestData, 'is_custom', false);
+
+            if(!$isCustom) {
+                if (!is_numeric($variationId)) {
+                    return;
+                } 
+            }
+
+            if (is_numeric($quantity)) {
+                $quantity = intval($quantity);
+                $quantity = max($quantity, 1);
+            } else {
+                $quantity = 1;
+            }
+
+            if($isCustom) {
+                $variation = apply_filters('fluent_cart/cart/validate_custom_item', null, [
+                    'item_id'          => $variationId,
+                    'quantity'         => $quantity,
+                    'is_custom'        => $isCustom,
+                    'action'           => 'instant_checkout',
+                ]);
+
+                if (!is_object($variation)) {
+                    $variation = (object) $variation;
+                }
+
+            } else {
+                $variation = ProductVariation::query()->find($variationId);
+            }
+
+            if (empty($variation)) {
+                return;
+            }
+
+            $soldIndividually = $isCustom
+            ? !empty($variation->sold_individually)  
+            : (bool) $variation->soldIndividually();
+
+            if ($soldIndividually) {
+                $quantity = 1;
+            }
+
+            $cart = CartResource::generateCartForInstantCheckout($variationId, $quantity, [
+                'is_custom' => $isCustom,
+                'variation' => $variation
+            ]);
+
+            if (is_wp_error($cart)) {
+                (new CheckoutPageHandler())->enqueueStyles();
+                ob_start();
+                (new CartRenderer([]))->renderEmpty(
+                    $cart->get_error_message()
+                );
+                $view = ob_get_clean();
+                FrontendView::make(__('Product Not Found', 'fluent-cart'), $view);
+                die();
+            }
+
+            $coupons = App::request()->get('coupons', '');
+            if ($coupons) {
+                $coupons = explode(',', $coupons);
+                $coupons = array_map('sanitize_text_field', $coupons);
+                $couponResult = $cart->applyCoupon($coupons);
+                
+
+                $couponErrors = [];
+                if (is_wp_error($couponResult)) {
+                    $couponErrors[] = esc_html($couponResult->get_error_message());
+                } elseif (is_array($couponResult)) {
+                    $perCouponResults = Arr::get($couponResult, 'coupon_results', []);
+                    foreach ($coupons as $code) {
+                        foreach ($perCouponResults as $resultCode => $result) {
+                            if (strcasecmp((string) $resultCode, (string) $code) === 0) {
+                                $errorMessage = Arr::get($result, 'error', '');
+                                if ($errorMessage !== '') {
+                                    $couponErrors[] = esc_html($errorMessage);
+                                }
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                if ($couponErrors) {
+                    $checkoutData = is_array($cart->checkout_data) ? $cart->checkout_data : [];
+                    $checkoutData['__checkout_error_notices'] = $couponErrors;
+                    $cart->checkout_data = $checkoutData;
+                    $cart->save();
+                }
+            }
+
+            $target_path = (new StoreSettings())->getCheckoutPage();
+
+            $redirectTo = App::request()->get('redirect_to');
+            if (!empty($redirectTo)) {
+                $url = sanitize_url(wp_unslash($redirectTo));
+                $allowedHosts = [wp_parse_url(home_url(), PHP_URL_HOST)];
+                $allowedHosts = apply_filters('fluent_cart/instant_checkout/allowed_redirect_hosts', $allowedHosts, [
+                    'allowed_hosts' => $allowedHosts
+                ]);
+                if (!empty($url) && filter_var($url, FILTER_VALIDATE_URL) && in_array(wp_parse_url($url, PHP_URL_HOST), $allowedHosts, true)) {
+                    $target_path = $url;
+                }
+            }
+
+
+            // Step 1: Get current query string and parse to array
+
+            $queryArray = [];
+            $queryString = Arr::get( App::request()->server(), 'QUERY_STRING');
+            if ( isset($queryString) ) {
+                parse_str($queryString, $queryArray);
+            }
+
+            unset($queryArray['fluent-cart']);
+            unset($queryArray['item_id']);
+            unset($queryArray['quantity']);
+            unset($queryArray['coupons']);
+            unset($queryArray['redirect_to']);
+
+            if (isset($queryArray['is_custom'])) {
+                unset($queryArray['is_custom']);
+            }
+
+            $queryArray['fct_cart_hash'] = $cart->cart_hash;
+
+            $redirect_url = URL::appendQueryParams($target_path, $queryArray);
+
+            wp_redirect($redirect_url);
+            exit;
+        }
+
+        $served = self::handleMainRoutes($page);
+
+        // Handle faker routes if enabled and not already served
+        if (!$served && App::config()->get('using_faker') === true) {
+            $served = FakerRoutes::handle($page);
+        }
+
+        if (has_action('fluent_cart_action_' . $page)) {
+            $requestData = App::request()->all();
+            do_action('fluent_cart_action_' . $page, $requestData);
+            die();
+        }
+
+        if ($served) {
+            die();
+        }
+
+        return '';
+    }
+
+    private static function handleMainRoutes($page): bool
+    {
+        $request = App::request();
+        switch ($page) {
+            case 'fluent_cart_payment_authenticate':
+                (new PayPalPartnerRenderer($request->mode))->render(
+                    $request->all()
+                );
+                return true;
+            case 'download-by-id':
+            case 'download-file':
+                // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- Escaped in view template
+                echo (new FileDownloader())->index(App::request());
+                return true;
+
+            case 'receipt':
+                $receiptHandler = new ReceiptHandler();
+
+                $view = $receiptHandler->renderRedirectPage([
+                    'type' => 'receipt'
+                ]);
+
+                FrontendView::make(
+                    __('Order Receipt', 'fluent-cart'),
+                    $view,
+                    [
+                        'styles'         => [
+                            'public/checkout/style/confirmation.scss'
+                        ],
+                        'scripts'        => [
+                            [
+                                'source'   => 'public/lib/printThis-2.0.0.min.js',
+                                'isStatic' => true
+                            ],
+                            'public/print/Print.js'
+                        ],
+                        'enqueue_prefix' => 'fluent-cart-checkout-order-receipt',
+                        'wp_head'        => false,
+                        'wp_footer'      => false,
+                    ]);
+                return true;
+
+            case 'order-review':
+                ob_start();
+                $orderFound = (new OrderReviewRenderer(
+                    sanitize_text_field($request->get('order_hash', ''))
+                ))->render();
+                $orderReview = ob_get_clean();
+
+                // A bad or stale link is a page that does not exist, and
+                // says so to crawlers as well as people.
+                if (!$orderFound) {
+                    status_header(404);
+                }
+
+                // wp_head/wp_footer left on, unlike the receipt: the review
+                // form's script and stylesheet are enqueued during render()
+                // and there is nowhere else for them to print. It also lets
+                // the theme dress a page the customer reaches from an email.
+                // wp_head/wp_footer forced on. This route renders the whole
+                // document, so nothing else prints them — and the view's
+                // is_page() guard would otherwise skip both on a site whose
+                // front page is static, silently dropping every asset the
+                // review form (and Pro's photo fields) enqueued.
+                FrontendView::make(
+                    __('Review Your Order', 'fluent-cart'),
+                    $orderReview,
+                    [
+                        'wp_head'   => true,
+                        'wp_footer' => true,
+                    ]
+                );
+                return true;
+
+            case 'print-invoice':
+                return self::handlePrintRoute('invoice');
+
+            case 'print-packing-slip':
+                return self::handlePrintRoute('packingSlip');
+
+            case 'print-delivery-slip':
+                return self::handlePrintRoute('deliverySlip');
+
+            case 'print-shipping-slip':
+                return self::handlePrintRoute('shippingSlip');
+
+            case 'print-dispatch-slip':
+                return self::handlePrintRoute('dispatchSlip');
+            
+            case 'modal_checkout':
+                return self::handleModalCheckout();
+
+            default:
+                return false;
+        }
+    }
+
+    private static function handleModalCheckout(): bool
+    {
+        $variationId = App::request()->get('item_id');
+        $quantity = App::request()->get('quantity', 1);
+
+        if (!is_numeric($variationId)) {
+            return false;
+        }
+
+        if (is_numeric($quantity)) {
+            $quantity = intval($quantity);
+            $quantity = max($quantity, 1);
+        } else {
+            $quantity = 1;
+        }
+
+        $variation = ProductVariation::query()->find($variationId);
+
+        if (empty($variation)) {
+            return false;
+        }
+
+        $soldIndividually = $variation->soldIndividually();
+
+        if ($soldIndividually) {
+            $quantity = 1;
+        }
+
+        $cart = CartResource::generateCartForInstantCheckout($variationId, $quantity);
+
+        // A WP_Error is truthy, so without this it reached the renderer as a cart.
+        if (is_wp_error($cart)) {
+            return false;
+        }
+
+        if ($cart) {
+            $modalCheckoutRenderer = new ModalCheckoutRenderer($cart);
+            ob_start();
+            $modalCheckoutRenderer->renderForm();
+            $checkoutContent = ob_get_clean();
+
+            AssetLoader::loadCheckoutAssets($cart);
+
+            Vite::enqueueStyle(
+                'fluentcart-modal-checkout-iframe-css',
+                'public/checkout/style/checkout-iframe.scss'
+            );
+
+//            Vite::enqueueScript(
+//                'fluentcart-modal-checkout-form-js',
+//                'public/checkout/ModalCheckoutForm.js',
+//                []
+//            );
+
+            FrontendView::make(__('Checkout', 'fluent-cart'), $checkoutContent);
+            die();
+        }
+
+        return false;
+
+
+    }
+
+    private static function handlePrintRoute($method): bool
+    {
+        if (!is_user_logged_in() || !current_user_can('manage_options')) {
+            return false;
+        }
+
+        $order = App::request()->get('order');
+        if (!empty($order)) {
+            PrintService::$method($order);
+            return true;
+        }
+        return false;
+    }
+}
