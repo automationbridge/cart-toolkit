@@ -10,7 +10,7 @@
 |---|---|
 | Name | Cart Toolkit |
 | Slug | `cart-toolkit` |
-| Version | 0.3.0 |
+| Version | 0.3.1 |
 | Requires | FluentCart (free) 2.3.2+ |
 | Class prefix | `CTK_` |
 | GitHub | `automationbridge/cart-toolkit` (public since 0.2.0; updater `'public' => true`, no key needed) |
@@ -259,6 +259,9 @@ The page carries the design; the form is a white card inside it. Wrapper `.ctk-f
 The price picker renders on `fluent_cart/after_customer_details` (inside the card, after name and email), before the
 asked fields. Form cart items get `view_url` blanked (`CTK_Checkout::unlinked()`), so the checkout's product name and
 image don't link to the product page; order items only expose `view_url` for custom items, so receipts were already plain.
+The button label is set twice: `fluent_cart/checkout_page_order_button_text` for the drawn button, and
+`fluent_cart/checkout/localize_data` (`fluentcart_checkout_vars.submit_button.text`), because Stripe's script resets the
+button to that text once its card box loads (seen live in 0.3.0).
 
 ## Hand-off (`CTK_Handoff`)
 
@@ -269,7 +272,7 @@ connector reports no contact yet (`ctk_no_contact`). Resend: `admin-post.php?act
 
 ## Testing
 
-Harness in the scratchpad stubs WP + cart/order objects and runs the real classes (60 checks: field validation,
+Harness in the scratchpad stubs WP + cart/order objects and runs the real classes (62 checks: field validation,
 form price rules, form-only rules, order-bump allowance, closed form, hand-off values, settings merge, log cap, form
 create/apply), plus load tests of the main file without FluentCart and of the API routes with it. Not yet run on a live site.
 

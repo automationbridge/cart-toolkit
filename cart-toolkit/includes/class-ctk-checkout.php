@@ -46,6 +46,7 @@ class CTK_Checkout {
 		add_action( 'fluent_cart/after_customer_details', array( __CLASS__, 'render_fields' ) );
 		add_action( 'fluent_cart/render_custom_form_field', array( __CLASS__, 'render_custom_field' ) );
 		add_filter( 'fluent_cart/checkout_page_order_button_text', array( __CLASS__, 'button_text' ) );
+		add_filter( 'fluent_cart/checkout/localize_data', array( __CLASS__, 'script_button_text' ), 10, 2 );
 
 		add_filter( 'fluent_cart/checkout/validate_data', array( __CLASS__, 'validate' ), 10, 2 );
 		add_action( 'fluent_cart/checkout/prepare_other_data', array( __CLASS__, 'save_answers' ) );
@@ -382,12 +383,29 @@ class CTK_Checkout {
 		return array( 'switched' => (int) $variation->id );
 	}
 
-	/** The form's button text. {price} becomes what the chosen price charges today. */
+	/** The form's button text, or '' for FluentCart's own. {price} becomes what the chosen price charges today. */
+	private static function button_label( array $form, $cart ) {
+		return '' === $form['button_text'] ? '' : str_replace( '{price}', self::form_amount( $form, $cart ), $form['button_text'] );
+	}
+
+	/** The button as the page is drawn. */
 	public static function button_text( $text ) {
-		if ( ! self::$rendering || '' === self::$rendering['button_text'] ) {
-			return $text;
+		$label = self::$rendering ? self::button_label( self::$rendering, self::$rendering_cart ) : '';
+		return '' !== $label ? $label : $text;
+	}
+
+	/**
+	 * The button text FluentCart's scripts put back once a payment box loads
+	 * (Stripe resets it from fluentcart_checkout_vars.submit_button.text).
+	 */
+	public static function script_button_text( $data, $cart ) {
+		$form  = self::form_of_cart( $cart );
+		$label = $form ? self::button_label( $form, $cart ) : '';
+		if ( '' !== $label && isset( $data['fluentcart_checkout_vars'] ) ) {
+			// The script writes it as HTML.
+			$data['fluentcart_checkout_vars']['submit_button']['text'] = esc_html( $label );
 		}
-		return str_replace( '{price}', self::form_amount( self::$rendering, self::$rendering_cart ), self::$rendering['button_text'] );
+		return $data;
 	}
 
 	/** What the form's own price in the cart charges today, as "$299.00". */

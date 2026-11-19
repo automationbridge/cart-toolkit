@@ -92,6 +92,15 @@
 	font-size: 18px;
 	font-weight: 600;
 	letter-spacing: 0.01em;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	text-align: center;
+}
+
+/* Breathing room between the form's own questions. */
+.ctk-form [id^="fct_wrapper_ctk_f_"] + [id^="fct_wrapper_ctk_f_"] {
+	margin-top: 16px;
 }
 
 .ctk-form .fct_place_order_btn:not([disabled]):hover {
@@ -122,6 +131,7 @@
 
 .ctk-option {
 	display: flex;
+	flex-wrap: wrap;
 	align-items: center;
 	gap: 14px;
 	min-height: 72px;
@@ -165,6 +175,7 @@
 }
 
 .ctk-option-price {
+	margin-left: auto;
 	font-size: 15px;
 	color: var(--ctk-muted);
 	white-space: nowrap;
@@ -220,13 +231,3 @@
 	}
 }
 
-@media (max-width: 380px) {
-	.ctk-option {
-		flex-wrap: wrap;
-	}
-
-	.ctk-option-price {
-		width: 100%;
-		padding-left: 32px;
-	}
-}
