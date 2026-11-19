@@ -50,6 +50,9 @@ class CTK_Checkout {
 		add_filter( 'fluent_cart/checkout/localize_data', array( __CLASS__, 'script_button_text' ), 10, 2 );
 
 		add_filter( 'fluent_cart/checkout/validate_data', array( __CLASS__, 'validate' ), 10, 2 );
+		add_filter( 'fluent_cart/payment/success_url', array( __CLASS__, 'thank_you_url' ), 10, 2 );
+		add_filter( 'fluent_cart/transaction/receipt_page_url', array( __CLASS__, 'thank_you_url' ), 10, 2 );
+		add_action( 'wp_footer', array( __CLASS__, 'thank_you_nudge' ) );
 		add_action( 'fluent_cart/checkout/prepare_other_data', array( __CLASS__, 'save_answers' ) );
 	}
 
@@ -619,6 +622,52 @@ class CTK_Checkout {
 		$order->updateMeta( CTK_META_ANSWERS, $answers );
 
 		self::link_existing_login( $order );
+	}
+
+	/* ── After payment ── */
+
+	/** The form an order came from, or null. */
+	private static function form_of_order( $order ) {
+		$meta = $order ? $order->getMeta( CTK_META_FORM, array() ) : array();
+		return empty( $meta['id'] ) ? null : CTK_Forms::get( $meta['id'] );
+	}
+
+	/** The form's own published thank-you page, or null for FluentCart's receipt. */
+	private static function thank_you_page( $form ) {
+		$page = ( $form && $form['thank_you_page'] ) ? get_post( $form['thank_you_page'] ) : null;
+		return ( $page && 'page' === $page->post_type && 'publish' === $page->post_status ) ? $page : null;
+	}
+
+	/**
+	 * Send a form's buyer to the form's thank-you page in place of the receipt.
+	 * FluentCart builds this address in two places (the success URL and, after a
+	 * card check, the receipt URL), so both filters land here. The receipt's own
+	 * query (trx_hash ...) is carried over, so [fluent_cart_receipt] still works there.
+	 */
+	public static function thank_you_url( $url, $context ) {
+		$page = self::thank_you_page( self::form_of_order( $context['order'] ?? null ) );
+		if ( ! $page ) {
+			return $url;
+		}
+		wp_parse_str( (string) wp_parse_url( $url, PHP_URL_QUERY ), $query );
+		return add_query_arg( array_map( 'rawurlencode', $query ), get_permalink( $page ) );
+	}
+
+	/**
+	 * On a thank-you page, fire the hook FluentCart's receipt fires when first
+	 * shown, so its after-purchase steps get the same immediate start.
+	 */
+	public static function thank_you_nudge() {
+		$hash = isset( $_GET['trx_hash'] ) ? sanitize_text_field( wp_unslash( $_GET['trx_hash'] ) ) : '';
+		if ( '' === $hash || ! is_page() ) {
+			return;
+		}
+		$transaction = \FluentCart\App\Models\OrderTransaction::query()->where( 'uuid', $hash )->first();
+		$order       = $transaction ? $transaction->order : null;
+		$page        = self::thank_you_page( self::form_of_order( $order ) );
+		if ( $page && (int) $page->ID === get_queried_object_id() ) {
+			do_action( 'fluent_cart/after_receipt_first_time', array( 'order' => $order, 'order_operation' => null ) );
+		}
 	}
 
 	/**

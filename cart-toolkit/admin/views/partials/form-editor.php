@@ -237,6 +237,21 @@ for ( $ctk_i = 0; $ctk_i < 3; $ctk_i++ ) {
 						<p class="description">Write <code>{price}</code> to show the chosen price, for example "Join Today – {price}". Leave blank for FluentCart's own "Place order".</p>
 					</td>
 				</tr>
+				<tr>
+					<th scope="row"><label for="ctk-thank-you">After payment</label></th>
+					<td>
+						<?php
+						wp_dropdown_pages( array(
+							'name'              => 'thank_you_page',
+							'id'                => 'ctk-thank-you',
+							'selected'          => (int) $ctk_form['thank_you_page'],
+							'show_option_none'  => 'FluentCart\'s receipt page',
+							'option_none_value' => '0',
+						) );
+						?>
+						<p class="description">Where the buyer lands once the order goes through. After-purchase steps run the same either way. To show the receipt on your own page too, add <code>[fluent_cart_receipt]</code> to it.</p>
+					</td>
+				</tr>
 				<?php if ( ! $ctk_is_free ) : ?>
 					<tr>
 						<th scope="row">Coupons</th>

@@ -56,6 +56,7 @@ class CTK_Forms {
 		'accent'            => self::DEFAULT_ACCENT,
 		'plan_heading'      => 'Choose your plan',
 		'price_notes'       => array(),
+		'thank_you_page'    => 0,
 	);
 
 	/** @return array id => form */
@@ -183,6 +184,7 @@ class CTK_Forms {
 			'accent'            => $accent ? $accent : self::DEFAULT_ACCENT,
 			'plan_heading'      => sanitize_text_field( $input['plan_heading'] ?? '' ),
 			'price_notes'       => $notes,
+			'thank_you_page'    => absint( $input['thank_you_page'] ?? 0 ),
 		) );
 		self::save( $form );
 		return array( $form, $notice );

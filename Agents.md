@@ -10,7 +10,7 @@
 |---|---|
 | Name | Cart Toolkit |
 | Slug | `cart-toolkit` |
-| Version | 0.3.2 |
+| Version | 0.4.0 |
 | Requires | FluentCart (free) 2.3.2+ |
 | Class prefix | `CTK_` |
 | GitHub | `automationbridge/cart-toolkit` (public since 0.2.0; updater `'public' => true`, no key needed) |
@@ -267,6 +267,17 @@ Name and email (0.3.2): `fluent_cart/checkout_page_name_fields_schema` (scope `r
 CSS lays `#billing_personal_information_section` out as a grid: first/last name 50/50, email full width, one column at
 600px and under, separate rounded boxes; FluentCart's docked in-box label (`::after` from `data-fct-label`) is hidden.
 
+## After payment (0.4.0)
+
+Form key `thank_you_page` (page id, 0 = FluentCart's receipt; editor "After payment"). `CTK_Checkout::thank_you_url`
+is on both `fluent_cart/payment/success_url` and `fluent_cart/transaction/receipt_page_url` (Stripe's card-check return
+uses the second). It reads the form from the order's `_ctk_form` meta (saved on `prepare_other_data`, before the gateway
+runs) and swaps the receipt page for the form's page if it is a published page, keeping the receipt's query
+(`trx_hash`, `method`, `fct_redirect`), so `[fluent_cart_receipt]` placed on that page still renders. The receipt page's
+only job on load is FluentCart's nudge (`fluent_cart/after_receipt_first_time` → AJAX `fluent_cart_run_order_actions`);
+`thank_you_nudge` (wp_footer) fires that same hook on the form's thank-you page, so after-purchase steps start as fast.
+Payment confirmation does not depend on the receipt page.
+
 ## Hand-off (`CTK_Handoff`)
 
 `fluent_cart/order_paid_done` (20, after FluentCart's integrations at 11). Values: ask + link answers from the order,
@@ -276,7 +287,7 @@ connector reports no contact yet (`ctk_no_contact`). Resend: `admin-post.php?act
 
 ## Testing
 
-Harness in the scratchpad stubs WP + cart/order objects and runs the real classes (66 checks: field validation,
+Harness in the scratchpad stubs WP + cart/order objects and runs the real classes (71 checks: field validation,
 form price rules, form-only rules, order-bump allowance, closed form, hand-off values, settings merge, log cap, form
 create/apply), plus load tests of the main file without FluentCart and of the API routes with it. Not yet run on a live site.
 
