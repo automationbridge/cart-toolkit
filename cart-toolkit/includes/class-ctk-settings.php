@@ -26,6 +26,16 @@ class CTK_Settings {
 		update_option( CTK_OPT_SETTINGS, array_merge( is_array( $saved ) ? $saved : array(), $changes ) );
 	}
 
+	/** Save the Overview's settings from raw input. A missing switch means off. */
+	public static function apply( array $input ) {
+		$connector = sanitize_key( $input['connector'] ?? 'auto' );
+		$allowed   = array_merge( array( 'auto', 'none' ), array_keys( CTK_Connector::all() ) );
+		self::update( array(
+			'connector'     => in_array( $connector, $allowed, true ) ? $connector : 'auto',
+			'link_existing' => empty( $input['link_existing'] ) ? 0 : 1,
+		) );
+	}
+
 	/** FluentCart is loaded and new enough for the hooks Cart Toolkit uses. */
 	public static function fluentcart_ready() {
 		return defined( 'FLUENTCART_VERSION' )

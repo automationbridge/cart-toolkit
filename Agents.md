@@ -10,10 +10,10 @@
 |---|---|
 | Name | Cart Toolkit |
 | Slug | `cart-toolkit` |
-| Version | 0.1.0 |
+| Version | 0.2.0 |
 | Requires | FluentCart (free) 2.3.2+ |
 | Class prefix | `CTK_` |
-| GitHub | `automationbridge/cart-toolkit` (private) |
+| GitHub | `automationbridge/cart-toolkit` (public since 0.2.0; updater `'public' => true`, no key needed) |
 | Installed on | saileapps.com (testing, FluentCRM). Members site later (Groundhogg via WP Fusion). |
 
 ---
@@ -189,7 +189,30 @@ cart-toolkit/
 ## Boot
 
 `ctk_boot()` always starts the admin. Everything touching FluentCart (`CTK_Form_Only`, `CTK_Checkout`,
-`CTK_Handoff`) starts only when `CTK_Settings::fluentcart_ready()`.
+`CTK_Handoff`, `CTK_Rest`) starts only when `CTK_Settings::fluentcart_ready()`.
+
+## Setup API (`CTK_Rest`, 0.2.0)
+
+`cart-toolkit/v1`, every route `manage_options` (application password). Each route calls the same method as its admin
+handler: `CTK_Forms::create()` / `CTK_Forms::apply()` / `CTK_Settings::apply()` / `CTK_Fields::*` / `CTK_Form_Only::save()`.
+`apply()` treats a missing switch as off, so the API merges the saved form (or settings) under the request body first;
+left-out keys keep their value.
+
+| Route | Does |
+|---|---|
+| `GET /state` | settings, connector, CRM fields, library, forms (+ shortcode, link, page URL), products with prices (+ form_only), form-only ids |
+| `POST /settings` | `connector`, `link_existing` |
+| `POST /fields` | `keys[]` added from the active CRM |
+| `POST`/`DELETE /fields/{key}` | `label`, `type`, `options[]` / remove |
+| `POST /forms` | `name`, `product_id`, `kind` → new form (off) |
+| `POST`/`DELETE /forms/{id}` | any form setting / delete |
+| `POST /form-only` | `ids[]`, replaces the list |
+| `GET /orders/{id}` | `_ctk_form`, `_ctk_answers`, `_ctk_handoff` of an order |
+| `POST /orders/{id}/resend` | hand-off again |
+| `GET /log?source=` | log entries |
+
+Login for saileapps.com: `~/.config/site-agent/saileapps.env` (password read from Keychain `saileapps-wp-app-password`),
+used with `~/.claude/skills/wp-plugin-delivery/wp-api.sh`.
 
 ## Data
 
@@ -236,9 +259,9 @@ connector reports no contact yet (`ctk_no_contact`). Resend: `admin-post.php?act
 
 ## Testing
 
-Harness in the scratchpad stubs WP + cart/order objects and runs the real classes (45 checks: field validation,
-form price rules, form-only rules, order-bump allowance, closed form, hand-off values, settings merge, log cap), plus a
-load test of the main file without FluentCart. Not yet run on a live site.
+Harness in the scratchpad stubs WP + cart/order objects and runs the real classes (55 checks: field validation,
+form price rules, form-only rules, order-bump allowance, closed form, hand-off values, settings merge, log cap, form
+create/apply), plus load tests of the main file without FluentCart and of the API routes with it. Not yet run on a live site.
 
 ## Decided (2026-11-18)
 

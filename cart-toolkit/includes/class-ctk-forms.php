@@ -76,6 +76,89 @@ class CTK_Forms {
 		update_option( CTK_OPT_FORMS, $all );
 	}
 
+	/**
+	 * A new form, switched off until its prices are chosen. Saved and returned.
+	 *
+	 * @return array|WP_Error
+	 */
+	public static function create( $name, $product_id, $kind ) {
+		$name       = sanitize_text_field( (string) $name );
+		$product_id = absint( $product_id );
+		if ( '' === $name || ! $product_id || ! isset( self::products()[ $product_id ] ) ) {
+			return new WP_Error( 'name_needed', 'Give the form a name and choose a product.' );
+		}
+		$kind = 'free' === $kind ? 'free' : 'paid';
+		$form = array_merge( self::DEFAULTS, array(
+			'id'          => self::new_id( $name ),
+			'name'        => $name,
+			'kind'        => $kind,
+			'product_id'  => $product_id,
+			'active'      => false,
+			'button_text' => 'free' === $kind ? 'Join free' : '',
+		) );
+		self::save( $form );
+		return $form;
+	}
+
+	/**
+	 * Apply edited settings to a form and save it. $input has the editor's keys,
+	 * unslashed and unsanitized; a missing switch (active, coupons) means off.
+	 * Only prices of the form's product are kept, and a free signup keeps only $0 ones.
+	 *
+	 * @return array [ saved form, notice key: 'form_saved' or 'not_free' ]
+	 */
+	public static function apply( array $form, array $input ) {
+		$notice   = 'form_saved';
+		$selected = array_map( 'absint', (array) ( $input['variation_ids'] ?? array() ) );
+
+		$allowed = array();
+		foreach ( self::product_variations( $form['product_id'] ) as $variation ) {
+			if ( ! in_array( (int) $variation->id, $selected, true ) ) {
+				continue;
+			}
+			if ( 'free' === $form['kind'] && ! self::is_free_price( $variation ) ) {
+				$notice = 'not_free';
+				continue;
+			}
+			$allowed[] = (int) $variation->id;
+		}
+		// Keep the order the prices were chosen in.
+		$allowed = array_values( array_intersect( $selected, $allowed ) );
+
+		$rows = array();
+		foreach ( (array) ( $input['fields'] ?? array() ) as $row ) {
+			$row = (array) $row;
+			$key = sanitize_text_field( $row['key'] ?? '' );
+			if ( '' === $key || ! CTK_Fields::get( $key ) ) {
+				continue;
+			}
+			$mode   = sanitize_key( $row['mode'] ?? 'ask' );
+			$rows[] = array(
+				'key'      => $key,
+				'mode'     => isset( CTK_Fields::MODES[ $mode ] ) ? $mode : 'ask',
+				'required' => ! empty( $row['required'] ),
+				'value'    => sanitize_text_field( $row['value'] ?? '' ),
+				'param'    => sanitize_key( $row['param'] ?? '' ),
+				'source'   => array_key_exists( $row['source'] ?? '', CTK_Fields::ORDER_SOURCES ) ? $row['source'] : 'user_id',
+			);
+		}
+
+		$default = absint( $input['default_variation'] ?? 0 );
+		$form    = array_merge( $form, array(
+			'name'              => sanitize_text_field( $input['name'] ?? $form['name'] ),
+			'active'            => ! empty( $input['active'] ),
+			'variation_ids'     => $allowed,
+			'default_variation' => in_array( $default, $allowed, true ) ? $default : 0,
+			'page_id'           => absint( $input['page_id'] ?? 0 ),
+			'coupons'           => 'paid' === $form['kind'] && ! empty( $input['coupons'] ),
+			'button_text'       => sanitize_text_field( $input['button_text'] ?? '' ),
+			'fields_heading'    => sanitize_text_field( $input['fields_heading'] ?? '' ),
+			'fields'            => $rows,
+		) );
+		self::save( $form );
+		return array( $form, $notice );
+	}
+
 	/** A new form's id: its name as a slug, made unique. */
 	public static function new_id( $name ) {
 		$base = sanitize_title( $name );

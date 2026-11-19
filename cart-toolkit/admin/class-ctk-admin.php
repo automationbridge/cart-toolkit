@@ -22,7 +22,7 @@ class CTK_Admin {
 		'fields'   => array( 'label' => 'Field library', 'desc' => 'The CRM fields forms can use. A form can only ask for a field that is here, so every answer has a place in the CRM.' ),
 		'formonly' => array( 'label' => 'Form-only prices', 'desc' => 'Prices that can only be bought through a form that sells them.' ),
 		'logs'     => array( 'label' => 'Logs', 'desc' => 'Everything Cart Toolkit did, newest first.' ),
-		'updates'  => array( 'label' => 'GitHub Updates', 'desc' => 'Updates this plugin from its private GitHub repo.' ),
+		'updates'  => array( 'label' => 'GitHub Updates', 'desc' => 'Updates this plugin from its GitHub repo.' ),
 	);
 
 	/** Notice key => [type, message]. */
@@ -233,12 +233,7 @@ class CTK_Admin {
 
 	public static function handle_save_settings() {
 		self::guard( 'ctk_save_settings' );
-		$connector = sanitize_key( self::post( 'connector', 'auto' ) );
-		$allowed   = array_merge( array( 'auto', 'none' ), array_keys( CTK_Connector::all() ) );
-		CTK_Settings::update( array(
-			'connector'     => in_array( $connector, $allowed, true ) ? $connector : 'auto',
-			'link_existing' => self::post( 'link_existing' ) ? 1 : 0,
-		) );
+		CTK_Settings::apply( wp_unslash( $_POST ) ); // phpcs:ignore WordPress.Security.ValidatedSanitizedInput, WordPress.Security.NonceVerification.Missing -- checked in guard(), sanitized by apply().
 		self::back( 'overview', 'settings_saved' );
 	}
 
@@ -272,22 +267,11 @@ class CTK_Admin {
 
 	public static function handle_form_create() {
 		self::guard( 'ctk_form_create' );
-		$name    = sanitize_text_field( self::post( 'name' ) );
-		$product = absint( self::post( 'product_id' ) );
-		if ( '' === $name || ! $product ) {
+		$form = CTK_Forms::create( self::post( 'name' ), self::post( 'product_id' ), self::post( 'kind' ) );
+		if ( is_wp_error( $form ) ) {
 			self::back( 'forms', 'name_needed' );
 		}
-		$kind = 'free' === self::post( 'kind' ) ? 'free' : 'paid';
-		$form = array_merge( CTK_Forms::DEFAULTS, array(
-			'id'          => CTK_Forms::new_id( $name ),
-			'name'        => $name,
-			'kind'        => $kind,
-			'product_id'  => $product,
-			'active'      => false,
-			'button_text' => 'free' === $kind ? 'Join free' : '',
-		) );
-		CTK_Forms::save( $form );
-		CTK_Log::add( 'admin', 'Form created', true, $name );
+		CTK_Log::add( 'admin', 'Form created', true, $form['name'] );
 		self::back( 'forms', 'form_created', array( 'edit' => $form['id'] ) );
 	}
 
@@ -297,55 +281,7 @@ class CTK_Admin {
 		if ( ! $form ) {
 			self::back( 'forms', 'form_missing' );
 		}
-
-		$notice   = 'form_saved';
-		$selected = array_map( 'absint', (array) self::post( 'variation_ids', array() ) );
-
-		// Only prices of the form's product; a free signup only $0 prices.
-		$allowed = array();
-		foreach ( CTK_Forms::product_variations( $form['product_id'] ) as $variation ) {
-			if ( ! in_array( (int) $variation->id, $selected, true ) ) {
-				continue;
-			}
-			if ( 'free' === $form['kind'] && ! CTK_Forms::is_free_price( $variation ) ) {
-				$notice = 'not_free';
-				continue;
-			}
-			$allowed[] = (int) $variation->id;
-		}
-		// Keep the order the prices were ticked in the list.
-		$allowed = array_values( array_intersect( $selected, $allowed ) );
-
-		$rows = array();
-		foreach ( (array) self::post( 'fields', array() ) as $row ) {
-			$key = sanitize_text_field( $row['key'] ?? '' );
-			if ( '' === $key || ! CTK_Fields::get( $key ) ) {
-				continue;
-			}
-			$mode   = sanitize_key( $row['mode'] ?? 'ask' );
-			$rows[] = array(
-				'key'      => $key,
-				'mode'     => isset( CTK_Fields::MODES[ $mode ] ) ? $mode : 'ask',
-				'required' => ! empty( $row['required'] ),
-				'value'    => sanitize_text_field( $row['value'] ?? '' ),
-				'param'    => sanitize_key( $row['param'] ?? '' ),
-				'source'   => array_key_exists( $row['source'] ?? '', CTK_Fields::ORDER_SOURCES ) ? $row['source'] : 'user_id',
-			);
-		}
-
-		$default = absint( self::post( 'default_variation' ) );
-		$form    = array_merge( $form, array(
-			'name'              => sanitize_text_field( self::post( 'name', $form['name'] ) ),
-			'active'            => (bool) self::post( 'active' ),
-			'variation_ids'     => $allowed,
-			'default_variation' => in_array( $default, $allowed, true ) ? $default : 0,
-			'page_id'           => absint( self::post( 'page_id' ) ),
-			'coupons'           => 'paid' === $form['kind'] && (bool) self::post( 'coupons' ),
-			'button_text'       => sanitize_text_field( self::post( 'button_text' ) ),
-			'fields_heading'    => sanitize_text_field( self::post( 'fields_heading' ) ),
-			'fields'            => $rows,
-		) );
-		CTK_Forms::save( $form );
+		list( $form, $notice ) = CTK_Forms::apply( $form, wp_unslash( $_POST ) ); // phpcs:ignore WordPress.Security.ValidatedSanitizedInput, WordPress.Security.NonceVerification.Missing -- checked in guard(), sanitized by apply().
 		CTK_Log::add( 'admin', 'Form saved', true, $form['name'] . ( $form['active'] ? ' (on)' : ' (off)' ) );
 		self::back( 'forms', $notice, array( 'edit' => $form['id'] ) );
 	}
