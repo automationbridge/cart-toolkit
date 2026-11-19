@@ -10,7 +10,7 @@
 |---|---|
 | Name | Cart Toolkit |
 | Slug | `cart-toolkit` |
-| Version | 0.4.0 |
+| Version | 0.4.1 |
 | Requires | FluentCart (free) 2.3.2+ |
 | Class prefix | `CTK_` |
 | GitHub | `automationbridge/cart-toolkit` (public since 0.2.0; updater `'public' => true`, no key needed) |
@@ -275,7 +275,7 @@ uses the second). It reads the form from the order's `_ctk_form` meta (saved on 
 runs) and swaps the receipt page for the form's page if it is a published page, keeping the receipt's query
 (`trx_hash`, `method`, `fct_redirect`), so `[fluent_cart_receipt]` placed on that page still renders. The receipt page's
 only job on load is FluentCart's nudge (`fluent_cart/after_receipt_first_time` → AJAX `fluent_cart_run_order_actions`);
-`thank_you_nudge` (wp_footer) fires that same hook on the form's thank-you page, so after-purchase steps start as fast.
+`thank_you_nudge` (wp_footer) fires that same hook on the form's thank-you page (unless the page shows `[fluent_cart_receipt]`, which already fires it), so after-purchase steps start as fast.
 Payment confirmation does not depend on the receipt page.
 
 ## Hand-off (`CTK_Handoff`)

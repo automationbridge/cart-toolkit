@@ -665,7 +665,8 @@ class CTK_Checkout {
 		$transaction = \FluentCart\App\Models\OrderTransaction::query()->where( 'uuid', $hash )->first();
 		$order       = $transaction ? $transaction->order : null;
 		$page        = self::thank_you_page( self::form_of_order( $order ) );
-		if ( $page && (int) $page->ID === get_queried_object_id() ) {
+		// A page showing [fluent_cart_receipt] already gets the nudge from FluentCart.
+		if ( $page && (int) $page->ID === get_queried_object_id() && ! has_shortcode( $page->post_content, 'fluent_cart_receipt' ) ) {
 			do_action( 'fluent_cart/after_receipt_first_time', array( 'order' => $order, 'order_operation' => null ) );
 		}
 	}
