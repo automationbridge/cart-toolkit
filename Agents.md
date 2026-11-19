@@ -10,7 +10,7 @@
 |---|---|
 | Name | Cart Toolkit |
 | Slug | `cart-toolkit` |
-| Version | 0.3.1 |
+| Version | 0.3.2 |
 | Requires | FluentCart (free) 2.3.2+ |
 | Class prefix | `CTK_` |
 | GitHub | `automationbridge/cart-toolkit` (public since 0.2.0; updater `'public' => true`, no key needed) |
@@ -262,6 +262,10 @@ image don't link to the product page; order items only expose `view_url` for cus
 The button label is set twice: `fluent_cart/checkout_page_order_button_text` for the drawn button, and
 `fluent_cart/checkout/localize_data` (`fluentcart_checkout_vars.submit_button.text`), because Stripe's script resets the
 button to that text once its card box loads (seen live in 0.3.0).
+Name and email (0.3.2): `fluent_cart/checkout_page_name_fields_schema` (scope `render`, form carts only) gives them a
+`label` (FluentCart then prints a real `<label>` above the box, same class as the asked fields) and an empty placeholder.
+CSS lays `#billing_personal_information_section` out as a grid: first/last name 50/50, email full width, one column at
+600px and under, separate rounded boxes; FluentCart's docked in-box label (`::after` from `data-fct-label`) is hidden.
 
 ## Hand-off (`CTK_Handoff`)
 
@@ -272,7 +276,7 @@ connector reports no contact yet (`ctk_no_contact`). Resend: `admin-post.php?act
 
 ## Testing
 
-Harness in the scratchpad stubs WP + cart/order objects and runs the real classes (62 checks: field validation,
+Harness in the scratchpad stubs WP + cart/order objects and runs the real classes (66 checks: field validation,
 form price rules, form-only rules, order-bump allowance, closed form, hand-off values, settings merge, log cap, form
 create/apply), plus load tests of the main file without FluentCart and of the API routes with it. Not yet run on a live site.
 

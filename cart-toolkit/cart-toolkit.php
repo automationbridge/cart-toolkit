@@ -3,7 +3,7 @@
  * Plugin Name: Cart Toolkit
  * Plugin URI:  https://automationbridge.com
  * Description: Add-on for the free FluentCart plugin: checkout forms that sell chosen prices with their own CRM fields, a free signup on the same engine, form-only prices, and a hand-off of every answer to the CRM.
- * Version:     0.3.1
+ * Version:     0.3.2
  * Update URI:  https://github.com/automationbridge/cart-toolkit
  * Author:      Chris L. Davis
  * Author URI:  https://automationbridge.com
@@ -17,7 +17,7 @@
 
 defined( 'ABSPATH' ) || exit;
 
-define( 'CTK_VERSION', '0.3.1' );
+define( 'CTK_VERSION', '0.3.2' );
 define( 'CTK_FILE', __FILE__ );
 define( 'CTK_DIR', plugin_dir_path( __FILE__ ) );
 define( 'CTK_URL', plugin_dir_url( __FILE__ ) );

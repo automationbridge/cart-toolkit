@@ -87,6 +87,11 @@ class CTK_Fields {
 
 	/* ── Drawing a field on the checkout ── */
 
+	/** A field's label as HTML, with the red star when it is required. */
+	public static function label_html( $text, $required ) {
+		return esc_html( $text ) . ( $required ? ' <span class="ctk-req" aria-hidden="true">*</span>' : '' );
+	}
+
 	/**
 	 * A FluentCart form-field array, drawn by FluentCart's own renderer so it
 	 * matches the rest of the checkout. Types FluentCart doesn't draw get a ctk_
@@ -94,7 +99,7 @@ class CTK_Fields {
 	 */
 	public static function to_checkout_field( $key, array $def, $required, $value = '' ) {
 		$type  = $def['type'] ?? 'text';
-		$label = esc_html( $def['label'] ?? $key ) . ( $required ? ' <span class="ctk-req" aria-hidden="true">*</span>' : '' );
+		$label = self::label_html( $def['label'] ?? $key, $required );
 		$field = array(
 			'id'       => self::input_id( $key ),
 			'name'     => self::INPUT . '[' . $key . ']',

@@ -98,6 +98,38 @@
 	text-align: center;
 }
 
+/*
+ * Name and email: labels above the boxes (CTK_Checkout::name_fields), first and
+ * last name side by side, email full width. Separate boxes, like the form's
+ * own fields, in place of FluentCart's joined stack.
+ */
+.ctk-form #billing_personal_information_section .fct_checkout_input_group {
+	display: grid;
+	grid-template-columns: repeat(2, minmax(0, 1fr));
+	gap: 16px;
+}
+
+.ctk-form #billing_personal_information_section .fct_input_wrapper {
+	margin: 0;
+	display: flex;
+	flex-direction: column;
+}
+
+.ctk-form #fct_wrapper_billing_email,
+.ctk-form #fct_wrapper_billing_full_name {
+	grid-column: 1 / -1;
+}
+
+.ctk-form #billing_personal_information_section .fct_input_wrapper::after {
+	display: none;
+}
+
+.ctk-form #billing_personal_information_section .fct-input {
+	width: 100%;
+	border-width: 1px !important;
+	border-radius: var(--fct-input-radius) !important;
+}
+
 /* Breathing room between the form's own questions. */
 .ctk-form [id^="fct_wrapper_ctk_f_"] + [id^="fct_wrapper_ctk_f_"] {
 	margin-top: 16px;
@@ -228,6 +260,10 @@
 
 	.ctk-option {
 		padding: 12px 14px;
+	}
+
+	.ctk-form #billing_personal_information_section .fct_checkout_input_group {
+		grid-template-columns: minmax(0, 1fr);
 	}
 }
 

@@ -43,6 +43,7 @@ class CTK_Checkout {
 		add_shortcode( self::SHORTCODE, array( __CLASS__, 'shortcode' ) );
 
 		add_filter( 'fluent_cart/checkout/route_response', array( __CLASS__, 'switch_option' ), 10, 2 );
+		add_filter( 'fluent_cart/checkout_page_name_fields_schema', array( __CLASS__, 'name_fields' ), 10, 2 );
 		add_action( 'fluent_cart/after_customer_details', array( __CLASS__, 'render_fields' ) );
 		add_action( 'fluent_cart/render_custom_form_field', array( __CLASS__, 'render_custom_field' ) );
 		add_filter( 'fluent_cart/checkout_page_order_button_text', array( __CLASS__, 'button_text' ) );
@@ -430,6 +431,21 @@ class CTK_Checkout {
 			}
 		}
 		return $rows;
+	}
+
+	/**
+	 * Name and email on a form get a label above the box, like the form's own
+	 * fields, in place of FluentCart's label inside the box.
+	 */
+	public static function name_fields( $fields, $context ) {
+		if ( 'render' !== ( $context['scope'] ?? '' ) || ! self::form_of_cart( $context['cart'] ?? null ) ) {
+			return $fields;
+		}
+		foreach ( $fields as $key => $field ) {
+			$fields[ $key ]['label']       = CTK_Fields::label_html( $field['aria-label'] ?? '', 'yes' === ( $field['required'] ?? '' ) );
+			$fields[ $key ]['placeholder'] = '';
+		}
+		return $fields;
 	}
 
 	/** @param array $args ['cart' => Cart] */
