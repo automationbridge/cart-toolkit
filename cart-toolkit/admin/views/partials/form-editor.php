@@ -249,7 +249,11 @@ for ( $ctk_i = 0; $ctk_i < 3; $ctk_i++ ) {
 							'option_none_value' => '0',
 						) );
 						?>
-						<p class="description">Where the buyer lands once the order goes through. After-purchase steps run the same either way. To show the receipt on your own page too, add <code>[fluent_cart_receipt]</code> to it.</p>
+						<p class="ctk-block-choice">
+							<label for="ctk-thank-you-url">Or a web address:</label>
+							<input type="url" class="regular-text" id="ctk-thank-you-url" name="thank_you_url" value="<?php echo esc_attr( $ctk_form['thank_you_url'] ); ?>" placeholder="https://" />
+						</p>
+						<p class="description">Where the buyer lands once the order goes through. A web address, if filled in, is used in place of the page. After-purchase steps run the same either way. To show the receipt on a page of this site too, add <code>[fluent_cart_receipt]</code> to it.</p>
 					</td>
 				</tr>
 				<?php if ( ! $ctk_is_free ) : ?>

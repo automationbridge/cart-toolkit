@@ -10,7 +10,7 @@
 |---|---|
 | Name | Cart Toolkit |
 | Slug | `cart-toolkit` |
-| Version | 0.4.1 |
+| Version | 0.5.0 |
 | Requires | FluentCart (free) 2.3.2+ |
 | Class prefix | `CTK_` |
 | GitHub | `automationbridge/cart-toolkit` (public since 0.2.0; updater `'public' => true`, no key needed) |
@@ -267,7 +267,14 @@ Name and email (0.3.2): `fluent_cart/checkout_page_name_fields_schema` (scope `r
 CSS lays `#billing_personal_information_section` out as a grid: first/last name 50/50, email full width, one column at
 600px and under, separate rounded boxes; FluentCart's docked in-box label (`::after` from `data-fct-label`) is hidden.
 
-## After payment (0.4.0)
+## After payment (0.4.0, web address 0.5.0)
+
+Form key `thank_you_url` (http/https, wins over the page). `thank_you_target()` resolves url + whether it is this site
+(host of `home_url()`). Another site gets the bare address, never the receipt query: `trx_hash` opens the buyer's
+receipt. There the nudge can't run, so after-purchase steps start from FluentCart's Action Scheduler queue (seen
+running within seconds on saileapps). The nudge fires on any front-end request with a `trx_hash` whose order's form
+has a target, unless the queried post shows `[fluent_cart_receipt]`.
+
 
 Form key `thank_you_page` (page id, 0 = FluentCart's receipt; editor "After payment"). `CTK_Checkout::thank_you_url`
 is on both `fluent_cart/payment/success_url` and `fluent_cart/transaction/receipt_page_url` (Stripe's card-check return
@@ -287,7 +294,7 @@ connector reports no contact yet (`ctk_no_contact`). Resend: `admin-post.php?act
 
 ## Testing
 
-Harness in the scratchpad stubs WP + cart/order objects and runs the real classes (71 checks: field validation,
+Harness in the scratchpad stubs WP + cart/order objects and runs the real classes (74 checks: field validation,
 form price rules, form-only rules, order-bump allowance, closed form, hand-off values, settings merge, log cap, form
 create/apply), plus load tests of the main file without FluentCart and of the API routes with it. Not yet run on a live site.
 

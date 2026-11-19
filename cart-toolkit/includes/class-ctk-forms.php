@@ -57,6 +57,7 @@ class CTK_Forms {
 		'plan_heading'      => 'Choose your plan',
 		'price_notes'       => array(),
 		'thank_you_page'    => 0,
+		'thank_you_url'     => '',
 	);
 
 	/** @return array id => form */
@@ -185,6 +186,7 @@ class CTK_Forms {
 			'plan_heading'      => sanitize_text_field( $input['plan_heading'] ?? '' ),
 			'price_notes'       => $notes,
 			'thank_you_page'    => absint( $input['thank_you_page'] ?? 0 ),
+			'thank_you_url'     => esc_url_raw( trim( (string) ( $input['thank_you_url'] ?? '' ) ), array( 'http', 'https' ) ),
 		) );
 		self::save( $form );
 		return array( $form, $notice );

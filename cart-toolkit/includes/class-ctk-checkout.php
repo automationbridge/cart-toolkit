@@ -632,41 +632,65 @@ class CTK_Checkout {
 		return empty( $meta['id'] ) ? null : CTK_Forms::get( $meta['id'] );
 	}
 
-	/** The form's own published thank-you page, or null for FluentCart's receipt. */
-	private static function thank_you_page( $form ) {
-		$page = ( $form && $form['thank_you_page'] ) ? get_post( $form['thank_you_page'] ) : null;
-		return ( $page && 'page' === $page->post_type && 'publish' === $page->post_status ) ? $page : null;
+	/**
+	 * Where the form sends its buyer after payment, or null for FluentCart's
+	 * receipt. A web address wins over a page. 'local' is true for this site.
+	 *
+	 * @return array{url: string, local: bool}|null
+	 */
+	private static function thank_you_target( $form ) {
+		if ( ! $form ) {
+			return null;
+		}
+		if ( '' !== $form['thank_you_url'] ) {
+			$host = wp_parse_url( $form['thank_you_url'], PHP_URL_HOST );
+			return array( 'url' => $form['thank_you_url'], 'local' => $host === wp_parse_url( home_url(), PHP_URL_HOST ) );
+		}
+		$page = $form['thank_you_page'] ? get_post( $form['thank_you_page'] ) : null;
+		if ( $page && 'page' === $page->post_type && 'publish' === $page->post_status ) {
+			return array( 'url' => get_permalink( $page ), 'local' => true );
+		}
+		return null;
 	}
 
 	/**
-	 * Send a form's buyer to the form's thank-you page in place of the receipt.
-	 * FluentCart builds this address in two places (the success URL and, after a
-	 * card check, the receipt URL), so both filters land here. The receipt's own
-	 * query (trx_hash ...) is carried over, so [fluent_cart_receipt] still works there.
+	 * Send a form's buyer to the form's thank-you page or address in place of the
+	 * receipt. FluentCart builds this address in two places (the success URL and,
+	 * after a card check, the receipt URL), so both filters land here. On this
+	 * site the receipt's query (trx_hash ...) is carried over, so
+	 * [fluent_cart_receipt] still works there. Another site never gets it:
+	 * trx_hash opens the buyer's receipt.
 	 */
 	public static function thank_you_url( $url, $context ) {
-		$page = self::thank_you_page( self::form_of_order( $context['order'] ?? null ) );
-		if ( ! $page ) {
+		$target = self::thank_you_target( self::form_of_order( $context['order'] ?? null ) );
+		if ( ! $target ) {
 			return $url;
 		}
+		if ( ! $target['local'] ) {
+			return $target['url'];
+		}
 		wp_parse_str( (string) wp_parse_url( $url, PHP_URL_QUERY ), $query );
-		return add_query_arg( array_map( 'rawurlencode', $query ), get_permalink( $page ) );
+		return add_query_arg( array_map( 'rawurlencode', $query ), $target['url'] );
 	}
 
 	/**
-	 * On a thank-you page, fire the hook FluentCart's receipt fires when first
-	 * shown, so its after-purchase steps get the same immediate start.
+	 * On a form's thank-you page on this site, fire the hook FluentCart's receipt
+	 * fires when first shown, so its after-purchase steps get the same immediate
+	 * start. Elsewhere they start from FluentCart's background queue.
 	 */
 	public static function thank_you_nudge() {
 		$hash = isset( $_GET['trx_hash'] ) ? sanitize_text_field( wp_unslash( $_GET['trx_hash'] ) ) : '';
-		if ( '' === $hash || ! is_page() ) {
+		if ( '' === $hash || is_admin() ) {
+			return;
+		}
+		// A page showing [fluent_cart_receipt] already gets the nudge from FluentCart.
+		$post = get_queried_object();
+		if ( $post instanceof WP_Post && has_shortcode( $post->post_content, 'fluent_cart_receipt' ) ) {
 			return;
 		}
 		$transaction = \FluentCart\App\Models\OrderTransaction::query()->where( 'uuid', $hash )->first();
 		$order       = $transaction ? $transaction->order : null;
-		$page        = self::thank_you_page( self::form_of_order( $order ) );
-		// A page showing [fluent_cart_receipt] already gets the nudge from FluentCart.
-		if ( $page && (int) $page->ID === get_queried_object_id() && ! has_shortcode( $page->post_content, 'fluent_cart_receipt' ) ) {
+		if ( self::thank_you_target( self::form_of_order( $order ) ) ) {
 			do_action( 'fluent_cart/after_receipt_first_time', array( 'order' => $order, 'order_operation' => null ) );
 		}
 	}
