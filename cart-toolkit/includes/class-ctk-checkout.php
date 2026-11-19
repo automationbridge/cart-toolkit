@@ -8,9 +8,9 @@
  *   redirects to itself with ?fct_cart_hash=…, because FluentCart's checkout
  *   script only sends the cart reference when the address carries it.
  * - The form's own link (?fluent-cart=ctk_form&form=…) opens that page.
- * - FluentCart draws the checkout. Cart Toolkit adds the price picker above it
- *   and the form's fields inside it, checks everything on the server before an
- *   order exists, and saves the answers to the order.
+ * - FluentCart draws the checkout. Cart Toolkit adds the price picker and the
+ *   form's fields inside it, styles it as the form's card, checks everything on
+ *   the server before an order exists, and saves the answers to the order.
  *
  * @package Cart_Toolkit
  */
@@ -31,8 +31,9 @@ class CTK_Checkout {
 	private static $page_cart = null;
 	private static $page_error = '';
 
-	/** @var array|null The form whose checkout is being drawn right now. */
+	/** @var array|null The form whose checkout is being drawn right now, and its cart. */
 	private static $rendering = null;
+	private static $rendering_cart = null;
 
 	public static function init() {
 		add_filter( 'fluent_cart/cart/hash_resolvable_cart_groups', array( __CLASS__, 'resolvable_groups' ) );
@@ -99,16 +100,27 @@ class CTK_Checkout {
 		}
 
 		$cart                = CartHelper::generateCartFromVariation( $variation, 1 );
+		$cart->cart_data     = array_map( array( __CLASS__, 'unlinked' ), (array) $cart->cart_data );
 		$cart->cart_group    = CTK_CART_GROUP;
 		$cart->cart_hash     = md5( 'ctk_' . wp_generate_uuid4() . microtime() );
 		$cart->checkout_data = array(
 			'ctk_form'        => $form['id'],
 			'ctk_link'        => $link_values,
-			'disable_coupons' => $form['coupons'] ? 'no' : 'yes',
+			'disable_coupons' => ( $form['coupons'] && 'summary' === $form['style'] ) ? 'no' : 'yes',
 		);
 		$cart->save();
 
 		return $cart;
+	}
+
+	/**
+	 * A cart item without its link to FluentCart's product page. A form sells
+	 * its prices only through itself, so the checkout's product name and image
+	 * stay plain text instead of leading to the product page.
+	 */
+	public static function unlinked( $item ) {
+		$item['view_url'] = '';
+		return $item;
 	}
 
 	/** Values for the form's "From the link" fields, read from this request's address. */
@@ -274,16 +286,23 @@ class CTK_Checkout {
 		}
 
 		ob_start();
-		echo '<div class="ctk-form ctk-form-' . esc_attr( $form['kind'] ) . '" data-ctk-form="' . esc_attr( $form['id'] ) . '">';
-		self::render_picker( $form, $cart );
-		self::$rendering = $form;
+		printf(
+			'<div class="ctk-form ctk-form-%1$s ctk-style-%2$s" data-ctk-form="%3$s" style="--ctk-accent:%4$s">',
+			esc_attr( $form['kind'] ),
+			esc_attr( $form['style'] ),
+			esc_attr( $form['id'] ),
+			esc_attr( $form['accent'] )
+		);
+		self::$rendering      = $form;
+		self::$rendering_cart = $cart;
 		( new CheckoutPageHandler() )->renderCart( $cart, array() );
-		self::$rendering = null;
+		self::$rendering      = null;
+		self::$rendering_cart = null;
 		echo '</div>';
 		return ob_get_clean();
 	}
 
-	/** The price picker above the checkout, when a form sells more than one price. */
+	/** The price picker, after the buyer's details, when a form sells more than one price. */
 	private static function render_picker( array $form, $cart ) {
 		$variations = CTK_Forms::variations( $form );
 		if ( count( $variations ) < 2 ) {
@@ -294,13 +313,18 @@ class CTK_Checkout {
 		}, (array) $cart->cart_data );
 		?>
 		<fieldset class="ctk-picker">
-			<legend class="ctk-picker-legend"><?php esc_html_e( 'Choose your plan', 'cart-toolkit' ); ?></legend>
+			<legend class="ctk-picker-legend"><?php echo esc_html( '' !== $form['plan_heading'] ? $form['plan_heading'] : __( 'Choose your plan', 'cart-toolkit' ) ); ?></legend>
 			<div class="ctk-picker-options">
 				<?php foreach ( $variations as $variation ) : ?>
 					<label class="ctk-option">
 						<input type="radio" name="ctk_option" value="<?php echo esc_attr( $variation->id ); ?>" data-ctk-option
 							<?php checked( in_array( (int) $variation->id, $in_cart, true ) ); ?> />
-						<span class="ctk-option-title"><?php echo esc_html( $variation->variation_title ); ?></span>
+						<span class="ctk-option-name">
+							<span class="ctk-option-title"><?php echo esc_html( $variation->variation_title ); ?></span>
+							<?php if ( ! empty( $form['price_notes'][ $variation->id ] ) ) : ?>
+								<span class="ctk-option-note"><?php echo esc_html( $form['price_notes'][ $variation->id ] ); ?></span>
+							<?php endif; ?>
+						</span>
 						<span class="ctk-option-price"><?php echo esc_html( CTK_Forms::price_label( $variation ) ); ?></span>
 					</label>
 				<?php endforeach; ?>
@@ -341,7 +365,7 @@ class CTK_Checkout {
 				$items[] = $item;
 			}
 		}
-		$new = CartHelper::generateCartItemFromVariation( $variation, 1 );
+		$new = self::unlinked( CartHelper::generateCartItemFromVariation( $variation, 1 ) );
 		array_unshift( $items, $new );
 
 		$cart->cart_data = $items;
@@ -358,8 +382,22 @@ class CTK_Checkout {
 		return array( 'switched' => (int) $variation->id );
 	}
 
+	/** The form's button text. {price} becomes what the chosen price charges today. */
 	public static function button_text( $text ) {
-		return ( self::$rendering && '' !== self::$rendering['button_text'] ) ? self::$rendering['button_text'] : $text;
+		if ( ! self::$rendering || '' === self::$rendering['button_text'] ) {
+			return $text;
+		}
+		return str_replace( '{price}', self::form_amount( self::$rendering, self::$rendering_cart ), self::$rendering['button_text'] );
+	}
+
+	/** What the form's own price in the cart charges today, as "$299.00". */
+	private static function form_amount( array $form, $cart ) {
+		foreach ( (array) ( $cart ? $cart->cart_data : array() ) as $item ) {
+			if ( (int) ( $item['post_id'] ?? 0 ) === (int) $form['product_id'] ) {
+				return CTK_Forms::amount_label( (int) ( $item['subtotal'] ?? $item['unit_price'] ?? 0 ) );
+			}
+		}
+		return '';
 	}
 
 	/* ── The form's fields inside the checkout ── */
@@ -378,10 +416,13 @@ class CTK_Checkout {
 
 	/** @param array $args ['cart' => Cart] */
 	public static function render_fields( $args ) {
-		$form = self::form_of_cart( $args['cart'] ?? null );
+		$cart = $args['cart'] ?? null;
+		$form = self::form_of_cart( $cart );
 		if ( ! $form ) {
 			return;
 		}
+		self::render_picker( $form, $cart );
+
 		$fields = array();
 		foreach ( self::asked_fields( $form ) as list( $row, $def ) ) {
 			$fields[] = CTK_Fields::to_checkout_field( $row['key'], $def, ! empty( $row['required'] ) );

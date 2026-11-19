@@ -10,7 +10,7 @@
 |---|---|
 | Name | Cart Toolkit |
 | Slug | `cart-toolkit` |
-| Version | 0.2.0 |
+| Version | 0.3.0 |
 | Requires | FluentCart (free) 2.3.2+ |
 | Class prefix | `CTK_` |
 | GitHub | `automationbridge/cart-toolkit` (public since 0.2.0; updater `'public' => true`, no key needed) |
@@ -220,7 +220,7 @@ used with `~/.claude/skills/wp-plugin-delivery/wp-api.sh`.
 |---|---|
 | `ctk_settings` | `connector` (auto, fluentcrm, wpfusion, none), `link_existing` (1/0). Merged on save. |
 | `ctk_fields` | CRM field key => `label`, `type` (CTK_Connector::TYPES), `options[]`, `group` |
-| `ctk_forms` | id (slug, fixed) => `name`, `kind` (paid/free), `active`, `product_id`, `variation_ids[]` (ordered), `default_variation`, `page_id`, `coupons`, `button_text`, `fields_heading`, `fields[]` of `key`, `mode` (ask/set/link/order), `required`, `value`, `param`, `source` |
+| `ctk_forms` | id (slug, fixed) => `name`, `kind` (paid/free), `active`, `product_id`, `variation_ids[]` (ordered), `default_variation`, `page_id`, `coupons`, `button_text` (`{price}` placeholder), `fields_heading`, `style` (card/summary), `accent` (hex), `plan_heading`, `price_notes` (variation id => line under the name), `fields[]` of `key`, `mode` (ask/set/link/order), `required`, `value`, `param`, `source` |
 | `ctk_form_only` | int[] variation ids |
 | `ctk_log` | entries `time`, `source`, `action`, `ok`, `details`, `order_id` |
 | order meta `_ctk_form` | `id`, `name` |
@@ -250,6 +250,16 @@ used with `~/.claude/skills/wp-plugin-delivery/wp-api.sh`.
 - **Free signup** is the same engine with a $0 price: FluentCart forces offline payment for a $0 total and shows no
   payment box for a $0 one-time price, so it is a real FluentCart purchase.
 
+## Look (0.3.0)
+
+The page carries the design; the form is a white card inside it. Wrapper `.ctk-form.ctk-style-{card|summary}` with
+`--ctk-accent` inline. FluentCart is themed through its own CSS variables (`--fct-checkout-btn-bg-color`,
+`--fct-checkout-active-border-color`, `--fct-input-radius`, ...), never by restyling its markup. Card style hides
+`.fct_checkout_summary`, so coupons (which live in the summary) are forced off for it, in `apply()` and in `make_cart()`.
+The price picker renders on `fluent_cart/after_customer_details` (inside the card, after name and email), before the
+asked fields. Form cart items get `view_url` blanked (`CTK_Checkout::unlinked()`), so the checkout's product name and
+image don't link to the product page; order items only expose `view_url` for custom items, so receipts were already plain.
+
 ## Hand-off (`CTK_Handoff`)
 
 `fluent_cart/order_paid_done` (20, after FluentCart's integrations at 11). Values: ask + link answers from the order,
@@ -259,7 +269,7 @@ connector reports no contact yet (`ctk_no_contact`). Resend: `admin-post.php?act
 
 ## Testing
 
-Harness in the scratchpad stubs WP + cart/order objects and runs the real classes (55 checks: field validation,
+Harness in the scratchpad stubs WP + cart/order objects and runs the real classes (60 checks: field validation,
 form price rules, form-only rules, order-bump allowance, closed form, hand-off values, settings merge, log cap, form
 create/apply), plus load tests of the main file without FluentCart and of the API routes with it. Not yet run on a live site.
 

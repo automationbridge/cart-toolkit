@@ -1,26 +1,118 @@
 /**
- * Cart Toolkit form. Colours come from FluentCart's checkout variables where it
- * defines them, with neutral fallbacks, so the picker follows the store's theme.
+ * Cart Toolkit form: a white checkout card that sits inside the page's own design.
+ *
+ * FluentCart's checkout is themed through its own CSS variables, set here from
+ * the form's accent colour (--ctk-accent, written on the wrapper by the
+ * shortcode), so FluentCart's markup is never restyled element by element.
+ * Two styles: .ctk-style-card (one column, no order summary) and
+ * .ctk-style-summary (the form beside FluentCart's order summary).
  */
 
 .ctk-form {
-	--ctk-line: var(--fct-checkout-border-color, rgba(0, 0, 0, 0.14));
-	--ctk-accent: var(--fct-checkout-primary-color, currentColor);
-	--ctk-muted: var(--fct-checkout-secondary-text-color, rgba(0, 0, 0, 0.6));
+	--ctk-accent: #1e3a8a;
+	--ctk-text: #111827;
+	--ctk-muted: #4b5563;
+	--ctk-line: #d1d5db;
 	--ctk-error: #b42318;
+
+	--fct-checkout-btn-bg-color: var(--ctk-accent);
+	--fct-checkout-btn-hover-bg-color: var(--ctk-accent);
+	--fct-checkout-btn-text-color: #ffffff;
+	--fct-checkout-btn-hover-text-color: #ffffff;
+	--fct-checkout-active-border-color: var(--ctk-accent);
+	--fct-checkout-radio-active-border-color: var(--ctk-accent);
+	--fct-checkout-radio-active-bg-color: var(--ctk-accent);
+	--fct-checkout-border-color: var(--ctk-line);
+	--fct-checkout-primary-text-color: var(--ctk-text);
+	--fct-checkout-secondary-text-color: var(--ctk-muted);
+	--fct-input-radius: 6px;
+	--fct-container-radius: 8px;
+
+	box-sizing: border-box;
+	width: 100%;
+	margin: 0 auto;
+	padding: 40px 44px;
+	background: #ffffff;
+	color: var(--ctk-text);
+	border-radius: 12px;
+	box-shadow: 0 1px 3px rgba(15, 23, 42, 0.08), 0 16px 40px rgba(15, 23, 42, 0.08);
 }
+
+.ctk-form *,
+.ctk-form *::before,
+.ctk-form *::after {
+	box-sizing: border-box;
+}
+
+/* ── Simple card: one column, no order summary ── */
+
+.ctk-style-card {
+	max-width: 600px;
+}
+
+.ctk-style-card .fct_checkout_summary {
+	display: none;
+}
+
+.ctk-style-card .fct_checkout_inner {
+	display: block;
+	margin-bottom: 0;
+}
+
+.ctk-style-card .fct_checkout_form {
+	width: 100%;
+	max-width: none;
+}
+
+/* ── Card with order summary ── */
+
+.ctk-style-summary {
+	max-width: 1000px;
+	border-top: 4px solid var(--ctk-accent);
+}
+
+/* ── Inside the card ── */
+
+.ctk-form .fct-checkout,
+.ctk-form .fct_checkout {
+	margin: 0;
+	padding: 0;
+	background: transparent;
+}
+
+.ctk-form .fct_form_section_header_label {
+	font-size: 16px;
+	font-weight: 600;
+	color: var(--ctk-text);
+}
+
+.ctk-form .fct_place_order_btn {
+	min-height: 56px;
+	border-radius: 6px;
+	font-size: 18px;
+	font-weight: 600;
+	letter-spacing: 0.01em;
+}
+
+.ctk-form .fct_place_order_btn:not([disabled]):hover {
+	filter: brightness(1.1);
+}
+
+/* ── Price picker ── */
 
 .ctk-picker {
 	border: 0;
-	margin: 0 0 24px;
+	margin: 0 0 28px;
 	padding: 0;
 	min-width: 0;
 }
 
 .ctk-picker-legend {
+	font-size: 16px;
 	font-weight: 600;
-	margin-bottom: 10px;
+	margin-bottom: 12px;
 	padding: 0;
+	color: var(--ctk-text);
 }
 
 .ctk-picker-options {
@@ -31,12 +123,13 @@
 .ctk-option {
 	display: flex;
 	align-items: center;
-	gap: 12px;
-	padding: 14px 16px;
-	border: 1.5px solid var(--ctk-line);
-	border-radius: 10px;
+	gap: 14px;
+	min-height: 72px;
+	padding: 12px 18px;
+	border: 1px solid var(--ctk-line);
+	border-radius: 6px;
+	background: #ffffff;
 	cursor: pointer;
-	min-height: 52px;
 }
 
 .ctk-option:has(input:checked) {
@@ -45,18 +138,34 @@
 }
 
 .ctk-option input {
-	margin: 0;
 	flex: none;
+	width: 18px;
+	height: 18px;
+	margin: 0;
 	accent-color: var(--ctk-accent);
 }
 
-.ctk-option-title {
+.ctk-option-name {
 	flex: 1;
 	min-width: 0;
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+}
+
+.ctk-option-title {
+	font-size: 16px;
 	font-weight: 600;
+	color: var(--ctk-text);
+}
+
+.ctk-option-note {
+	font-size: 14px;
+	color: var(--ctk-muted);
 }
 
 .ctk-option-price {
+	font-size: 15px;
 	color: var(--ctk-muted);
 	white-space: nowrap;
 }
@@ -72,6 +181,8 @@
 	height: 1.5em;
 	overflow: hidden;
 }
+
+/* ── Field types FluentCart doesn't draw ── */
 
 .ctk-choices {
 	border: 0;
@@ -98,13 +209,24 @@
 	border-radius: 8px;
 }
 
-@media (max-width: 480px) {
+@media (max-width: 600px) {
+	.ctk-form {
+		padding: 24px 18px;
+		border-radius: 10px;
+	}
+
+	.ctk-option {
+		padding: 12px 14px;
+	}
+}
+
+@media (max-width: 380px) {
 	.ctk-option {
 		flex-wrap: wrap;
 	}
 
 	.ctk-option-price {
 		width: 100%;
-		padding-left: 28px;
+		padding-left: 32px;
 	}
 }

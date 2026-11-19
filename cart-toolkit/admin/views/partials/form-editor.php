@@ -98,7 +98,7 @@ for ( $ctk_i = 0; $ctk_i < 3; $ctk_i++ ) {
 			<?php else : ?>
 				<div class="ctk-table-scroll">
 					<table class="widefat striped">
-						<thead><tr><th>On form</th><th>Default</th><th>Price</th><th>Amount</th><th>Notes</th></tr></thead>
+						<thead><tr><th>On form</th><th>Default</th><th>Price</th><th>Amount</th><th>Line under the name</th><th>Status</th></tr></thead>
 						<tbody>
 							<?php foreach ( $ctk_variations as $ctk_v ) : ?>
 								<?php
@@ -117,6 +117,7 @@ for ( $ctk_i = 0; $ctk_i < 3; $ctk_i++ ) {
 									<td><input type="radio" name="default_variation" value="<?php echo esc_attr( $ctk_v->id ); ?>" <?php checked( (int) $ctk_form['default_variation'], (int) $ctk_v->id ); ?> <?php disabled( $ctk_disabled ); ?> aria-label="<?php echo esc_attr( $ctk_v->variation_title . ' is the default' ); ?>" /></td>
 									<td><strong><?php echo esc_html( $ctk_v->variation_title ); ?></strong> <span class="description">#<?php echo esc_html( $ctk_v->id ); ?></span></td>
 									<td><?php echo esc_html( CTK_Forms::price_label( $ctk_v ) ); ?></td>
+									<td><input type="text" name="price_notes[<?php echo esc_attr( $ctk_v->id ); ?>]" value="<?php echo esc_attr( $ctk_form['price_notes'][ $ctk_v->id ] ?? '' ); ?>" placeholder="e.g. 2 months free!" maxlength="80" aria-label="<?php echo esc_attr( 'Line under ' . $ctk_v->variation_title ); ?>" <?php disabled( $ctk_disabled ); ?> /></td>
 									<td><?php echo esc_html( implode( '. ', $ctk_notes ) ); ?></td>
 								</tr>
 							<?php endforeach; ?>
@@ -190,6 +191,40 @@ for ( $ctk_i = 0; $ctk_i < 3; $ctk_i++ ) {
 	<section class="ctk-setting">
 		<div class="ctk-setting-head">
 			<div>
+				<h3>Look</h3>
+				<p>The form is a card that sits inside your page. Design the page around it (headline, benefits, testimonials) with your page builder.</p>
+			</div>
+		</div>
+		<div class="ctk-setting-body">
+			<table class="form-table" role="presentation">
+				<tr>
+					<th scope="row">Style</th>
+					<td>
+						<fieldset>
+							<?php foreach ( CTK_Forms::STYLES as $ctk_style => $ctk_label ) : ?>
+								<label class="ctk-block-choice"><input type="radio" name="style" value="<?php echo esc_attr( $ctk_style ); ?>" <?php checked( $ctk_form['style'], $ctk_style ); ?> /> <?php echo esc_html( $ctk_label ); ?></label>
+							<?php endforeach; ?>
+						</fieldset>
+					</td>
+				</tr>
+				<tr>
+					<th scope="row"><label for="ctk-accent">Accent colour</label></th>
+					<td>
+						<input type="color" id="ctk-accent" name="accent" value="<?php echo esc_attr( $ctk_form['accent'] ); ?>" />
+						<p class="description">The button, the chosen price and the active fields.</p>
+					</td>
+				</tr>
+				<tr>
+					<th scope="row"><label for="ctk-plan-heading">Heading above the prices</label></th>
+					<td><input type="text" class="regular-text" id="ctk-plan-heading" name="plan_heading" value="<?php echo esc_attr( $ctk_form['plan_heading'] ); ?>" /></td>
+				</tr>
+			</table>
+		</div>
+	</section>
+
+	<section class="ctk-setting">
+		<div class="ctk-setting-head">
+			<div>
 				<h3>Checkout</h3>
 			</div>
 		</div>
@@ -199,13 +234,16 @@ for ( $ctk_i = 0; $ctk_i < 3; $ctk_i++ ) {
 					<th scope="row"><label for="ctk-button">Button text</label></th>
 					<td>
 						<input type="text" class="regular-text" id="ctk-button" name="button_text" value="<?php echo esc_attr( $ctk_form['button_text'] ); ?>" />
-						<p class="description">Leave blank for FluentCart's own "Place order".</p>
+						<p class="description">Write <code>{price}</code> to show the chosen price, for example "Join Today – {price}". Leave blank for FluentCart's own "Place order".</p>
 					</td>
 				</tr>
 				<?php if ( ! $ctk_is_free ) : ?>
 					<tr>
 						<th scope="row">Coupons</th>
-						<td><label><input type="checkbox" name="coupons" value="1" <?php checked( $ctk_form['coupons'] ); ?> /> Show the coupon field on this form</label></td>
+						<td>
+							<label><input type="checkbox" name="coupons" value="1" <?php checked( $ctk_form['coupons'] ); ?> /> Show the coupon field on this form</label>
+							<p class="description">The coupon field is part of the order summary, so it needs the "Card with order summary" style.</p>
+						</td>
 					</tr>
 				<?php endif; ?>
 			</table>

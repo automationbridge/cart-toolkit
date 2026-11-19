@@ -1891,3 +1891,8 @@
 .ctk-field-edit summary {
 	cursor: pointer;
 }
+
+.ctk-block-choice {
+	display: block;
+	margin: 4px 0 8px;
+}

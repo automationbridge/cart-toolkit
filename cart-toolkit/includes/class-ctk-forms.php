@@ -22,6 +22,14 @@ class CTK_Forms {
 		'free' => 'Free signup',
 	);
 
+	/** How the form's checkout card looks. The page around it is the page's own design. */
+	const STYLES = array(
+		'card'    => 'Simple card: one column, the price on the button, no order summary',
+		'summary' => 'Card with order summary: the form beside a summary of the order',
+	);
+
+	const DEFAULT_ACCENT = '#1e3a8a';
+
 	const INTERVALS = array(
 		'daily'       => 'day',
 		'weekly'      => 'week',
@@ -44,6 +52,10 @@ class CTK_Forms {
 		'button_text'       => '',
 		'fields_heading'    => 'A few questions',
 		'fields'            => array(),
+		'style'             => 'card',
+		'accent'            => self::DEFAULT_ACCENT,
+		'plan_heading'      => 'Choose your plan',
+		'price_notes'       => array(),
 	);
 
 	/** @return array id => form */
@@ -143,6 +155,18 @@ class CTK_Forms {
 			);
 		}
 
+		// A short line under a price's name, for the prices on the form.
+		$notes = array();
+		foreach ( (array) ( $input['price_notes'] ?? array() ) as $id => $note ) {
+			$note = sanitize_text_field( (string) $note );
+			if ( '' !== $note && in_array( (int) $id, $allowed, true ) ) {
+				$notes[ (int) $id ] = mb_substr( $note, 0, 80 );
+			}
+		}
+
+		$style   = sanitize_key( $input['style'] ?? 'card' );
+		$style   = isset( self::STYLES[ $style ] ) ? $style : 'card';
+		$accent  = sanitize_hex_color( (string) ( $input['accent'] ?? '' ) );
 		$default = absint( $input['default_variation'] ?? 0 );
 		$form    = array_merge( $form, array(
 			'name'              => sanitize_text_field( $input['name'] ?? $form['name'] ),
@@ -150,10 +174,15 @@ class CTK_Forms {
 			'variation_ids'     => $allowed,
 			'default_variation' => in_array( $default, $allowed, true ) ? $default : 0,
 			'page_id'           => absint( $input['page_id'] ?? 0 ),
-			'coupons'           => 'paid' === $form['kind'] && ! empty( $input['coupons'] ),
+			// The coupon box lives in the order summary, which only that style shows.
+			'coupons'           => 'paid' === $form['kind'] && 'summary' === $style && ! empty( $input['coupons'] ),
 			'button_text'       => sanitize_text_field( $input['button_text'] ?? '' ),
 			'fields_heading'    => sanitize_text_field( $input['fields_heading'] ?? '' ),
 			'fields'            => $rows,
+			'style'             => $style,
+			'accent'            => $accent ? $accent : self::DEFAULT_ACCENT,
+			'plan_heading'      => sanitize_text_field( $input['plan_heading'] ?? '' ),
+			'price_notes'       => $notes,
 		) );
 		self::save( $form );
 		return array( $form, $notice );
@@ -257,6 +286,11 @@ class CTK_Forms {
 		$interval = $variation->other_info['repeat_interval'] ?? 'yearly';
 		$word     = self::INTERVALS[ $interval ] ?? $interval;
 		return false !== strpos( $word, ' ' ) ? $price . ' every ' . $word : $price . ' / ' . $word;
+	}
+
+	/** "$299.00": what a price charges today, as plain text. */
+	public static function amount_label( $cents ) {
+		return html_entity_decode( Helper::toDecimal( (int) $cents ), ENT_QUOTES, 'UTF-8' );
 	}
 
 	/** Whether a price costs nothing, now and on renewal. */
