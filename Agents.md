@@ -1,3 +1,5 @@
+> **First:** read `~/Documents/Agent HQ/AGENTS.md` and follow it. HQ holds the rules for every project; this file holds only what is true for this project.
+
 # Cart Toolkit — Architecture Reference
 
 > Read this at the start of every conversation. Part 1 is the FluentCart source reference that the plugin is built on.
@@ -348,3 +350,13 @@ create/apply), plus load tests of the main file without FluentCart and of the AP
   401 "Invalid server key" on 2026-11-18; not saved to Keychain, file left for the owner.
 - Owner's answers on: linking existing logins (q5), building blocks (q9), per-form tags (q10), free-flow access (q11),
   password email (q12).
+
+## Project notes (moved from Claude's saved notes, 2026-11-20)
+
+Carried over as written. Some may be dated; check before relying on them.
+
+- Cart Toolkit rollout phases; real CRM is Groundhogg via WP Fusion on the members site, FluentCRM on saileapps is only a stand-in
+
+## Where the rest lives
+
+- Older notes that used to live in CLAUDE.md: `resources/CLAUDE-old.md` (may be dated).
